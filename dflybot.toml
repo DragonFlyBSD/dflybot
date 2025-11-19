@@ -1,0 +1,15 @@
+# Logger level: debug, info, warn, error
+log_level = "info"
+
+# The IRC to interact with.
+[irc]
+# Nickname
+nick = "dflybot"
+# Server address
+server = "irc.underworld.no"
+# Server port
+port = 6697
+# Whether to SSL?
+ssl = true
+# Channels to join (must prefix with '#')
+channels = ["#dragonflybsd"]
