@@ -82,10 +82,10 @@ func main() {
 		SSL:      config.IRC.SSL,
 		Channels: config.IRC.Channels,
 	})
-	go ibot.start()
+	go ibot.Start()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
-	ibot.stop()
+	ibot.Stop()
 }

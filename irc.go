@@ -103,7 +103,7 @@ func (b *IrcBot) tryCommand(text, target string) bool {
 	}
 }
 
-func (b *IrcBot) start() {
+func (b *IrcBot) Start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	b.cancel = cancel
 	b.wg.Add(1)
@@ -152,7 +152,7 @@ func (b *IrcBot) start() {
 	}
 }
 
-func (b *IrcBot) stop() {
+func (b *IrcBot) Stop() {
 	if b.cancel != nil {
 		b.cancel()
 		b.cancel = nil
