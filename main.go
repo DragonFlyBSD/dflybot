@@ -75,7 +75,7 @@ func main() {
 		slog.Warn("unknown log level", "level", config.LogLevel)
 	}
 
-	ibot := newIrcBot(&ircConfig{
+	ibot := NewIrcBot(&IrcConfig{
 		Nick:     config.IRC.Nick,
 		Server:   config.IRC.Server,
 		Port:     config.IRC.Port,

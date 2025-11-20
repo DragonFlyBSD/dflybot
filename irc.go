@@ -17,7 +17,7 @@ const (
 	maxBackoff  = 5 * time.Minute
 )
 
-type ircConfig struct {
+type IrcConfig struct {
 	Nick     string
 	Server   string
 	Port     uint16
@@ -25,14 +25,14 @@ type ircConfig struct {
 	Channels []string
 }
 
-type ircBot struct {
+type IrcBot struct {
 	conn     *irc.Conn
 	channels []string
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 }
 
-func newIrcBot(cfg *ircConfig) *ircBot {
+func NewIrcBot(cfg *IrcConfig) *IrcBot {
 	ic := irc.NewConfig(cfg.Nick)
 	ic.Server = fmt.Sprintf("%s:%d", cfg.Server, cfg.Port)
 	ic.PingFreq = 60 * time.Second
@@ -46,7 +46,7 @@ func newIrcBot(cfg *ircConfig) *ircBot {
 	}
 
 	conn := irc.Client(ic)
-	ibot := &ircBot{
+	ibot := &IrcBot{
 		conn:     conn,
 		channels: cfg.Channels, // copy for the HandleFunc() closure below
 	}
@@ -78,7 +78,7 @@ func newIrcBot(cfg *ircConfig) *ircBot {
 	return ibot
 }
 
-func (b *ircBot) handleCommand(l *irc.Line) {
+func (b *IrcBot) handleCommand(l *irc.Line) {
 	command := strings.TrimPrefix(strings.TrimSpace(l.Text()), "!")
 	cmd, args, _ := strings.Cut(command, " ")
 	cmd = strings.ToLower(cmd)
@@ -94,7 +94,7 @@ func (b *ircBot) handleCommand(l *irc.Line) {
 	}
 }
 
-func (b *ircBot) start() {
+func (b *IrcBot) start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	b.cancel = cancel
 	b.wg.Add(1)
@@ -143,7 +143,7 @@ func (b *ircBot) start() {
 	}
 }
 
-func (b *ircBot) stop() {
+func (b *IrcBot) stop() {
 	if b.cancel != nil {
 		b.cancel()
 		b.cancel = nil
