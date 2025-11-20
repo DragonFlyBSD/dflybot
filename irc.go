@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -66,7 +67,12 @@ func NewIrcBot(cfg *IrcConfig) *IrcBot {
 		slog.Debug("IRC PING from server", "line", l.Raw)
 	})
 	conn.HandleFunc(irc.PRIVMSG, func(c *irc.Conn, l *irc.Line) {
+		me := c.Me().Nick
+		re := regexp.MustCompile(`^@?` + me + `\s*:?\s+`)
 		text := strings.TrimSpace(l.Text())
+		if loc := re.FindStringIndex(text); loc != nil {
+			text = text[loc[1]:]
+		}
 		if strings.HasPrefix(text, "!") {
 			ibot.handleCommand(l)
 		} else {
