@@ -67,16 +67,14 @@ func NewIrcBot(cfg *IrcConfig) *IrcBot {
 		slog.Debug("IRC PING from server", "line", l.Raw)
 	})
 	conn.HandleFunc(irc.PRIVMSG, func(c *irc.Conn, l *irc.Line) {
+		slog.Debug("IRC received message", "target", l.Target(), "sender", l.Nick, "text", l.Text())
 		me := c.Me().Nick
 		re := regexp.MustCompile(`^@?` + me + `\s*:?\s+`)
 		text := strings.TrimSpace(l.Text())
 		if loc := re.FindStringIndex(text); loc != nil {
 			text = text[loc[1]:]
 		}
-		if strings.HasPrefix(text, "!") {
-			ibot.handleCommand(l)
-		} else {
-			slog.Debug("IRC received message", "target", l.Target(), "sender", l.Nick, "text", l.Text())
+		if !ibot.tryCommand(text, l.Target()) {
 			// TODO: relay
 		}
 	})
@@ -84,19 +82,24 @@ func NewIrcBot(cfg *IrcConfig) *IrcBot {
 	return ibot
 }
 
-func (b *IrcBot) handleCommand(l *irc.Line) {
-	command := strings.TrimPrefix(strings.TrimSpace(l.Text()), "!")
-	cmd, args, _ := strings.Cut(command, " ")
+func (b *IrcBot) tryCommand(text, target string) bool {
+	if !strings.HasPrefix(text, "!") {
+		return false
+	}
+
+	cmd, args, _ := strings.Cut(strings.TrimPrefix(text, "!"), " ")
 	cmd = strings.ToLower(cmd)
 	args = strings.TrimSpace(args)
-	slog.Debug("IRC received command", "target", l.Target(), "sender", l.Nick, "cmd", cmd, "args", args)
+	slog.Debug("IRC received command", "cmd", cmd, "args", args)
 
 	// TODO: more commands
 	switch cmd {
 	case "ping":
-		b.conn.Privmsg(l.Target(), "pong")
+		b.conn.Privmsg(target, "pong")
+		return true
 	default:
 		slog.Warn("IRC unknown command", "cmd", cmd, "args", args)
+		return false
 	}
 }
 
