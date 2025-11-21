@@ -154,7 +154,7 @@ func (b *TgBot) Post(msg Message) {
 		"<", "&lt;",
 		">", "&gt;",
 	).Replace(msg.Text)
-	text = fmt.Sprintf("<b>[IRC %s]</b> &lt;%s&gt; %s",
+	text = fmt.Sprintf("<b>[IRC %s]</b> <code>%s</code>💬 %s",
 		msg.Target, msg.From, text)
 
 	for _, chatID := range b.chats {
