@@ -7,7 +7,7 @@ toolchain go1.24.9
 require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/fluffle/goirc v1.3.3
-	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
+	github.com/go-telegram/bot v1.17.0
 )
 
 require (
