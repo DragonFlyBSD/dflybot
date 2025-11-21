@@ -21,11 +21,20 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+)
+
+const (
+	// Shorten the poll timeout to get rid of the error (unharmful) logs:
+	// "error get update, error do request for method getUpdates ...
+	// unexpected EOF".
+	pollTimeout = 30 * time.Second
 )
 
 type TgBot struct {
@@ -37,8 +46,11 @@ type TgBot struct {
 }
 
 func NewTgBot(token string, chats []int64) (*TgBot, error) {
-	b, err := bot.New(token, bot.WithMiddlewares(
-		func(next bot.HandlerFunc) bot.HandlerFunc {
+	b, err := bot.New(token,
+		bot.WithHTTPClient(pollTimeout, &http.Client{
+			Timeout: 2 * pollTimeout,
+		}),
+		bot.WithMiddlewares(func(next bot.HandlerFunc) bot.HandlerFunc {
 			return func(ctx context.Context, b *bot.Bot, update *models.Update) {
 				if m := update.Message; m != nil {
 					slog.Debug("TG bot received message",
@@ -48,7 +60,8 @@ func NewTgBot(token string, chats []int64) (*TgBot, error) {
 				}
 				next(ctx, b, update)
 			}
-		}))
+		}),
+	)
 	if err != nil {
 		slog.Error("TG bot creation failed", "error", err)
 		return nil, err
