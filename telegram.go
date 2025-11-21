@@ -18,64 +18,113 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
 )
 
 type TgBot struct {
-	bot   *tgbotapi.BotAPI
-	chats []int64
+	bot    *bot.Bot
+	chats  []int64
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
 func NewTgBot(token string, chats []int64) (*TgBot, error) {
-	bot, err := tgbotapi.NewBotAPI(token)
+	b, err := bot.New(token)
 	if err != nil {
 		slog.Error("TG bot creation failed", "error", err)
 		return nil, err
 	}
 
-	return &TgBot{bot: bot, chats: chats}, nil
+	tgbot := &TgBot{
+		bot:   b,
+		chats: chats,
+	}
+
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/start", bot.MatchTypeExact,
+		func(ctx context.Context, _ *bot.Bot, update *models.Update) {
+			chat := update.Message.Chat.ID
+			tgbot.send(ctx, &bot.SendMessageParams{
+				ChatID:    chat,
+				Text:      fmt.Sprintf("The Chat ID is <code>%d</code>.", chat),
+				ParseMode: models.ParseModeHTML,
+			})
+		})
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/whoami", bot.MatchTypeExact,
+		func(ctx context.Context, _ *bot.Bot, update *models.Update) {
+			chat := update.Message.Chat.ID
+			tgbot.send(ctx, &bot.SendMessageParams{
+				ChatID:    chat,
+				Text:      fmt.Sprintf("You are in Chat ID: <code>%d</code>.", chat),
+				ParseMode: models.ParseModeHTML,
+			})
+		})
+	b.RegisterHandler(bot.HandlerTypeMessageText, "", bot.MatchTypePrefix,
+		func(ctx context.Context, _ *bot.Bot, update *models.Update) {
+			m := update.Message
+			if !strings.HasPrefix(m.Text, "/") {
+				slog.Debug("TG bot received non-command message",
+					"from", m.From.Username, "text", m.Text)
+				return
+			}
+			tgbot.send(ctx, &bot.SendMessageParams{
+				ChatID: m.Chat.ID,
+				Text:   "Sorry, I don't know that command.",
+				ReplyParameters: &models.ReplyParameters{
+					MessageID: m.ID,
+				},
+			})
+		})
+
+	return tgbot, nil
 }
 
-func (b *TgBot) Start() {
-	slog.Info("TG bot authorized", "username", b.bot.Self.UserName)
-
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
-	updates := b.bot.GetUpdatesChan(u)
-
-	for update := range updates {
-		m := update.Message
-		if m == nil { // ignore any non-message updates
-			continue
-		}
-
-		slog.Debug("TG bot received message", "from", m.From.UserName, "text", m.Text)
-
-		if !m.IsCommand() { // ignore any non-command messages
-			continue
-		}
-
-		msg := tgbotapi.NewMessage(m.Chat.ID, "")
-		switch m.Command() {
-		case "help", "start":
-			msg.Text = fmt.Sprintf("The Chat ID is `%d`.", m.Chat.ID)
-			msg.ParseMode = tgbotapi.ModeMarkdown
-		default:
-			msg.Text = "Sorry, I don't know that command."
-			msg.ReplyToMessageID = m.MessageID
-		}
-
-		if _, err := b.bot.Send(msg); err != nil {
-			slog.Error("TG bot sending failed", "message", msg, "error", err)
-		}
+func (b *TgBot) send(ctx context.Context, msg *bot.SendMessageParams) {
+	if _, err := b.bot.SendMessage(ctx, msg); err != nil {
+		slog.Error("TG bot sending failed",
+			"to", msg.ChatID, "text", msg.Text, "error", err)
 	}
 }
 
+func (b *TgBot) Start() {
+	b.ctx, b.cancel = context.WithCancel(context.Background())
+	if me, err := b.bot.GetMe(b.ctx); err != nil {
+		slog.Error("TG bot GetMe failed", "error", err)
+		return
+	} else {
+		slog.Info("TG bot started", "id", me.ID, "username", me.Username)
+	}
+
+	b.wg.Add(1)
+	b.bot.Start(b.ctx)
+
+	slog.Info("TG bot polling stopped")
+	b.wg.Done()
+}
+
+func (b *TgBot) Stop() {
+	if b.cancel != nil {
+		b.cancel()
+		b.cancel = nil
+		b.ctx = nil
+	}
+	b.wg.Wait()
+	slog.Info("TG bot stopped")
+}
+
 func (b *TgBot) Post(msg Message) {
+	if b.ctx == nil {
+		slog.Error("TG bot called but not started")
+		return
+	}
+
 	text := strings.NewReplacer(
 		"&", "&amp;",
 		"<", "&lt;",
@@ -85,10 +134,10 @@ func (b *TgBot) Post(msg Message) {
 		msg.Target, msg.From, text)
 
 	for _, chatID := range b.chats {
-		message := tgbotapi.NewMessage(chatID, text)
-		message.ParseMode = tgbotapi.ModeHTML
-		if _, err := b.bot.Send(message); err != nil {
-			slog.Error("TG bot sending failed", "to", chatID, "message", msg, "error", err)
-		}
+		b.send(b.ctx, &bot.SendMessageParams{
+			ChatID:    chatID,
+			Text:      text,
+			ParseMode: models.ParseModeHTML,
+		})
 	}
 }
