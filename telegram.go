@@ -37,7 +37,18 @@ type TgBot struct {
 }
 
 func NewTgBot(token string, chats []int64) (*TgBot, error) {
-	b, err := bot.New(token)
+	b, err := bot.New(token, bot.WithMiddlewares(
+		func(next bot.HandlerFunc) bot.HandlerFunc {
+			return func(ctx context.Context, b *bot.Bot, update *models.Update) {
+				if m := update.Message; m != nil {
+					slog.Debug("TG bot received message",
+						"from", m.From.Username, "text", m.Text)
+				} else {
+					slog.Debug("TG bot received update", "id", update.ID)
+				}
+				next(ctx, b, update)
+			}
+		}))
 	if err != nil {
 		slog.Error("TG bot creation failed", "error", err)
 		return nil, err
