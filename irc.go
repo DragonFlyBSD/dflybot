@@ -1,11 +1,19 @@
+// SPDX-License-Identifier: MIT
+//
+// Copyright (c) 2025 Aaron LI
+//
+// IRC bot to fetch messages.
+//
+
 package main
 
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"log/slog"
+	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,13 +37,14 @@ type IrcConfig struct {
 type IrcBot struct {
 	conn     *irc.Conn
 	channels []string
+	bus      *Bus
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 }
 
-func NewIrcBot(cfg *IrcConfig) *IrcBot {
+func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 	ic := irc.NewConfig(cfg.Nick)
-	ic.Server = fmt.Sprintf("%s:%d", cfg.Server, cfg.Port)
+	ic.Server = net.JoinHostPort(cfg.Server, strconv.Itoa(int(cfg.Port)))
 	ic.PingFreq = 60 * time.Second
 	ic.Timeout = 30 * time.Second
 	if cfg.SSL {
@@ -50,6 +59,7 @@ func NewIrcBot(cfg *IrcConfig) *IrcBot {
 	ibot := &IrcBot{
 		conn:     conn,
 		channels: cfg.Channels, // copy for the HandleFunc() closure below
+		bus:      bus,
 	}
 
 	conn.EnableStateTracking()
@@ -75,7 +85,13 @@ func NewIrcBot(cfg *IrcConfig) *IrcBot {
 			text = text[loc[1]:]
 		}
 		if !ibot.tryCommand(text, l.Target()) {
-			// TODO: relay
+			bus.Produce(Message{
+				Source:    SourceIRC,
+				Timestamp: time.Now(),
+				From:      l.Nick,
+				Target:    l.Target(),
+				Text:      text,
+			})
 		}
 	})
 
