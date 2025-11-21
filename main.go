@@ -17,6 +17,10 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+const (
+	busBufferSize int = 100
+)
+
 type Config struct {
 	// Logger level: debug, info, warn, error
 	LogLevel string `toml:"log_level"`
@@ -33,6 +37,13 @@ type Config struct {
 		// Channels to join; must prefix with '#'
 		Channels []string `toml:"channels"`
 	} `toml:"irc"`
+	// Telegram settings.
+	Telegram struct {
+		// The bot token.
+		Token string `toml:"token"`
+		// The Chat IDs where to post messages.
+		Chats []int64 `toml:"chats"`
+	} `toml:"telegram"`
 }
 
 func main() {
@@ -55,7 +66,7 @@ func main() {
 	config := Config{}
 	if _, err := toml.DecodeFile(*configFile, &config); err != nil {
 		slog.Error("failed to read config", "file", *configFile, "error", err)
-		os.Exit(1)
+		panic(err)
 	}
 	slog.Debug("read config", "file", *configFile, "data", config)
 
@@ -75,17 +86,33 @@ func main() {
 		slog.Warn("unknown log level", "level", config.LogLevel)
 	}
 
+	bus := NewBus(busBufferSize)
+
+	tgbot, err := NewTgBot(config.Telegram.Token, config.Telegram.Chats)
+	if err != nil {
+		panic(err)
+	}
+	go tgbot.Start()
+
+	go func() {
+		sub := bus.Subscribe("telegram", busBufferSize)
+		for msg := range sub.C {
+			tgbot.Post(msg)
+		}
+	}()
+
 	ibot := NewIrcBot(&IrcConfig{
 		Nick:     config.IRC.Nick,
 		Server:   config.IRC.Server,
 		Port:     config.IRC.Port,
 		SSL:      config.IRC.SSL,
 		Channels: config.IRC.Channels,
-	})
+	}, bus)
 	go ibot.Start()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
 	ibot.Stop()
+	tgbot.Stop()
 }

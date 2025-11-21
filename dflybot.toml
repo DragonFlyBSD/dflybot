@@ -13,3 +13,10 @@ port = 6697
 ssl = true
 # Channels to join (must prefix with '#')
 channels = ["#dragonflybsd"]
+
+# Telegram settings.
+[telegram]
+# The bot token.
+token = "???"
+# The Chat IDs where to post messages.
+chats = [???, ???]
