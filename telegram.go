@@ -49,6 +49,16 @@ func NewTgBot(token string, chats []int64) (*TgBot, error) {
 	b, err := bot.New(token,
 		bot.WithHTTPClient(pollTimeout, &http.Client{
 			Timeout: 2 * pollTimeout,
+			Transport: &http.Transport{
+				// Disable keepalive allows the TG bot to
+				// quickly reconnect after a network
+				// disconnection (e.g., laptop suspend+resume);
+				// otherwise, there would be multiple errors
+				// logs: "context deadline exceeded
+				// (Client.Timeout exceeded while awaiting
+				// headers)"; which might lasts >30 minutes.
+				DisableKeepAlives: true,
+			},
 		}),
 		bot.WithMiddlewares(func(next bot.HandlerFunc) bot.HandlerFunc {
 			return func(ctx context.Context, b *bot.Bot, update *models.Update) {
