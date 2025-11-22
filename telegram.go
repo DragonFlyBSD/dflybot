@@ -50,6 +50,7 @@ func NewTgBot(token string, chats []int64) (*TgBot, error) {
 		bot.WithHTTPClient(pollTimeout, &http.Client{
 			Timeout: 2 * pollTimeout,
 			Transport: &http.Transport{
+				Proxy: http.ProxyFromEnvironment,
 				// Disable keepalive allows the TG bot to
 				// quickly reconnect after a network
 				// disconnection (e.g., laptop suspend+resume);
