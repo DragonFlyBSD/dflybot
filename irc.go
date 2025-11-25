@@ -79,7 +79,7 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 	conn.HandleFunc(irc.PRIVMSG, func(c *irc.Conn, l *irc.Line) {
 		slog.Debug("IRC received message", "target", l.Target(), "sender", l.Nick, "text", l.Text())
 		me := c.Me().Nick
-		re := regexp.MustCompile(`^@?` + me + `\s*:?\s+`)
+		re := regexp.MustCompile(`^@?` + me + `\s*[:,]?\s+`)
 		text := strings.TrimSpace(l.Text())
 		if loc := re.FindStringIndex(text); loc != nil {
 			text = text[loc[1]:]
