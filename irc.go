@@ -10,12 +10,14 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"log/slog"
 	"net"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	irc "github.com/fluffle/goirc/client"
@@ -24,6 +26,7 @@ import (
 const (
 	baseBackoff = 5 * time.Second
 	maxBackoff  = 5 * time.Minute
+	pingFreq    = 60 * time.Second
 )
 
 type IrcConfig struct {
@@ -45,7 +48,6 @@ type IrcBot struct {
 func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 	ic := irc.NewConfig(cfg.Nick)
 	ic.Server = net.JoinHostPort(cfg.Server, strconv.Itoa(int(cfg.Port)))
-	ic.PingFreq = 60 * time.Second
 	ic.Timeout = 30 * time.Second
 	if cfg.SSL {
 		ic.SSL = true
@@ -54,6 +56,8 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 			InsecureSkipVerify: true,
 		}
 	}
+	// NOTE: Don't set PingFreq as we'll also perform PINGs in
+	// startWatchdog().
 
 	conn := irc.Client(ic)
 	ibot := &IrcBot{
@@ -122,7 +126,9 @@ func (b *IrcBot) tryCommand(text, target string) bool {
 func (b *IrcBot) Start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	b.cancel = cancel
+
 	b.wg.Add(1)
+	go b.startWatchdog(ctx)
 
 	defer func() {
 		b.conn.Quit("shutting down; bye :P")
@@ -132,6 +138,7 @@ func (b *IrcBot) Start() {
 		b.wg.Done()
 	}()
 
+	b.wg.Add(1)
 	backoff := baseBackoff
 	for {
 		select {
@@ -164,6 +171,56 @@ func (b *IrcBot) Start() {
 				return
 			case <-time.After(1 * time.Second):
 			}
+		}
+	}
+}
+
+// The watchdog periodically pings the server to proactively detect the
+// disconnection (e.g., network lost, laptop suspension) and then force a
+// reconnection.  This is needed because goirc doesn't support to disable the
+// TCP keepalive and doesn't expose the underlying connection to archieve that.
+// Without disabling TCP keepalive, I observed that goirc waited about 15
+// minutes before detecting the disconnection.
+//
+// NOTE: Using PING might not work with some IRC servers, because the standard
+// only defines the server->client PING but not the client->server PING.
+func (b *IrcBot) startWatchdog(ctx context.Context) {
+	var lastPong atomic.Int64
+	remover := b.conn.HandleFunc(irc.PONG, func(_ *irc.Conn, l *irc.Line) {
+		slog.Debug("IRC PONG from server", "line", l.Raw)
+		lastPong.Store(time.Now().UnixNano())
+	})
+
+	defer func() {
+		remover.Remove()
+		b.wg.Done()
+	}()
+
+	timeout := time.Duration(1.5*pingFreq.Seconds()) * time.Second
+	ticker := time.NewTicker(pingFreq)
+	lastPong.Store(time.Now().UnixNano())
+
+	for {
+		select {
+		case <-ctx.Done():
+			ticker.Stop()
+			return
+		case <-ticker.C:
+			if !b.conn.Connected() {
+				lastPong.Store(time.Now().UnixNano())
+				continue // handled in Start() above
+			}
+
+			last := time.Unix(0, lastPong.Load())
+			if time.Since(last) >= timeout {
+				slog.Warn("IRC health check failed", "last_pong", last)
+				b.conn.Close()
+				lastPong.Store(time.Now().UnixNano())
+				continue
+			}
+
+			b.conn.Ping(fmt.Sprintf("healthcheck-%d", time.Now().UnixNano()))
+			slog.Debug("IRC sent PING to server")
 		}
 	}
 }
