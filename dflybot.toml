@@ -11,8 +11,12 @@ server = "irc.underworld.no"
 port = 6697
 # Whether to SSL?
 ssl = true
-# Channels to join (must prefix with '#')
-channels = ["#dragonflybsd"]
+# Channels to join (must prefix with '#') and the list of nicknames to auto-op.
+[irc.channels]
+"#dragonflybsd" = [
+	"aly", "aly-", "aly_",
+	"dillon", "swildner", "tuxillo",
+]
 
 # Telegram settings.
 [telegram]

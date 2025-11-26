@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,12 +35,12 @@ type IrcConfig struct {
 	Server   string
 	Port     uint16
 	SSL      bool
-	Channels []string
+	Channels map[string][]string
 }
 
 type IrcBot struct {
 	conn     *irc.Conn
-	channels []string
+	channels map[string][]string
 	bus      *Bus
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
@@ -69,7 +70,7 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 	conn.EnableStateTracking()
 	conn.HandleFunc(irc.CONNECTED, func(c *irc.Conn, _ *irc.Line) {
 		slog.Info("IRC connected", "server", c.Config().Server, "nick", c.Me().Nick)
-		for _, ch := range ibot.channels {
+		for ch := range ibot.channels {
 			c.Join(ch)
 			slog.Info("IRC joined", "channel", ch)
 		}
@@ -98,6 +99,29 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 			})
 		}
 	})
+	conn.HandleFunc(irc.JOIN, func(c *irc.Conn, l *irc.Line) {
+		ch := l.Args[0]
+		if !ibot.hasModeOp(ch) {
+			slog.Info("IRC bot does not have MODE +o yet", "channel", ch)
+			return
+		}
+		if l.Nick == c.Me().Nick {
+			ibot.tryAutoOp(ch, "")
+		} else {
+			ibot.tryAutoOp(ch, l.Nick)
+		}
+	})
+	conn.HandleFunc(irc.MODE, func(c *irc.Conn, l *irc.Line) {
+		slog.Debug("IRC received MODE", "target", l.Target(), "sender", l.Nick, "args", l.Args)
+		if len(l.Args) < 3 {
+			return
+		}
+		ch, mode, target := l.Args[0], l.Args[1], l.Args[2]
+		if target == c.Me().Nick && mode == "+o" {
+			slog.Info("IRC bot gained MODE +o", "channel", ch)
+			ibot.tryAutoOp(ch, "")
+		}
+	})
 
 	return ibot
 }
@@ -120,6 +144,58 @@ func (b *IrcBot) tryCommand(text, target string) bool {
 	default:
 		slog.Warn("IRC unknown command", "cmd", cmd, "args", args)
 		return false
+	}
+}
+
+func (b *IrcBot) hasModeOp(ch string) bool {
+	state := b.conn.StateTracker()
+	channel := state.GetChannel(ch)
+	if channel == nil {
+		slog.Warn("IRC state tracker cannot find", "channel", ch)
+		return false
+	}
+
+	me := b.conn.Me().Nick
+	privs, ok := channel.Nicks[me]
+	if !ok {
+		slog.Warn("IRC privileges not found", "channel", ch, "me", me)
+		return false
+	}
+
+	slog.Debug("IRC bot mode info", "channel", ch, "me", me, "privileges", privs)
+	return privs.Op
+}
+
+func (b *IrcBot) tryAutoOp(ch, nick string) {
+	opList, ok := b.channels[ch]
+	if !ok {
+		slog.Error("IRC auto list not found for", "channel", ch)
+		return
+	}
+
+	if nick == "" {
+		// Add +o for all online nicks in the auto list.
+		state := b.conn.StateTracker()
+		onList := make([]string, 0, len(opList))
+		for _, n := range opList {
+			if privs, ok := state.IsOn(ch, n); ok && !privs.Op {
+				onList = append(onList, n)
+			}
+		}
+		opList = onList
+	} else {
+		// Check the nick against the auto list and add +o if present.
+		if slices.Index(opList, nick) >= 0 {
+			opList = []string{nick}
+		} else {
+			slog.Debug("IRC ignored auto-op for", "channel", ch, "nick", nick)
+			return
+		}
+	}
+
+	slog.Info("IRC auto-op", "channel", ch, "nicks", opList)
+	for _, n := range opList {
+		b.conn.Mode(ch, "+o", n)
 	}
 }
 

@@ -34,8 +34,9 @@ type Config struct {
 		Port uint16 `toml:"port"`
 		// Whether to use SSL?
 		SSL bool `toml:"ssl"`
-		// Channels to join; must prefix with '#'
-		Channels []string `toml:"channels"`
+		// Channels to join (must prefix with '#') and the list of
+		// nicknames to auto-op.
+		Channels map[string][]string `toml:"channels"`
 	} `toml:"irc"`
 	// Telegram settings.
 	Telegram struct {
