@@ -57,8 +57,9 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 			InsecureSkipVerify: true,
 		}
 	}
-	// NOTE: Don't set PingFreq as we'll also perform PINGs in
-	// startWatchdog().
+	// NOTE: Clear PingFreq to disable the builtin PING loop as we'll also
+	// perform PINGs in startWatchdog().
+	ic.PingFreq = 0
 
 	conn := irc.Client(ic)
 	ibot := &IrcBot{
