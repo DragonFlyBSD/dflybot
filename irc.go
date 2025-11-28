@@ -90,12 +90,15 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 		if loc := re.FindStringIndex(text); loc != nil {
 			text = text[loc[1]:]
 		}
-		if !ibot.tryCommand(text, l.Target()) {
-			bus.Produce(Message{
+		if target := l.Target(); target == l.Nick {
+			// Private message to me.
+			ibot.tryCommand(text, target)
+		} else if !ibot.tryCommand(text, target) {
+			ibot.bus.Produce(Message{
 				Source:    SourceIRC,
 				Timestamp: time.Now(),
 				From:      l.Nick,
-				Target:    l.Target(),
+				Target:    target,
 				Text:      text,
 			})
 		}
