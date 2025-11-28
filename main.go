@@ -15,36 +15,40 @@ import (
 	"syscall"
 
 	"github.com/BurntSushi/toml"
+	"github.com/go-playground/validator/v10"
 )
 
 const (
 	busBufferSize int = 100
 )
 
+// Only need to use a single instance of Validate, which caches struct info.
+var validate = validator.New(validator.WithRequiredStructEnabled())
+
 type Config struct {
 	// Logger level: debug, info, warn, error
-	LogLevel string `toml:"log_level"`
+	LogLevel string `toml:"log_level" validate:"required,oneof=debug info warn error"`
 	// The IRC to interact with.
 	IRC struct {
 		// Nickname
-		Nick string `toml:"nick"`
+		Nick string `toml:"nick" validate:"required"`
 		// Server address
-		Server string `toml:"server"`
+		Server string `toml:"server" validate:"fqdn|ip"`
 		// Server port
-		Port uint16 `toml:"port"`
+		Port uint16 `toml:"port" validate:"port"`
 		// Whether to use SSL?
 		SSL bool `toml:"ssl"`
 		// Channels to join (must prefix with '#') and the list of
 		// nicknames to auto-op.
 		Channels map[string][]string `toml:"channels"`
-	} `toml:"irc"`
+	} `toml:"irc" validate:"required"`
 	// Telegram settings.
 	Telegram struct {
 		// The bot token.
-		Token string `toml:"token"`
+		Token string `toml:"token" validate:"required"`
 		// The Chat IDs where to post messages.
 		Chats []int64 `toml:"chats"`
-	} `toml:"telegram"`
+	} `toml:"telegram" validate:"required"`
 }
 
 func main() {
@@ -70,6 +74,11 @@ func main() {
 		panic(err)
 	}
 	slog.Debug("read config", "file", *configFile, "data", config)
+
+	if err := validate.Struct(&config); err != nil {
+		slog.Error("invalid config", "error", err)
+		panic(err)
+	}
 
 	if *isDebug {
 		config.LogLevel = "debug"
