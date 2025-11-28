@@ -28,6 +28,13 @@ var validate = validator.New(validator.WithRequiredStructEnabled())
 type Config struct {
 	// Logger level: debug, info, warn, error
 	LogLevel string `toml:"log_level" validate:"required,oneof=debug info warn error"`
+	// Webhook service to accept external notifications.
+	Webhook struct {
+		// Listen address, e.g., "127.0.0.1:2018"
+		Listen string `toml:"listen" validate:"tcp_addr"`
+		// Bearer token to authenticate.
+		Token string `toml:"token" validate:"required,min=20"`
+	} `toml:"webhook" validate:"required"`
 	// The IRC to interact with.
 	IRC struct {
 		// Nickname
@@ -98,6 +105,12 @@ func main() {
 
 	bus := NewBus(busBufferSize)
 
+	webhook, err := NewWebhook(config.Webhook.Listen, config.Webhook.Token, bus)
+	if err != nil {
+		panic(err)
+	}
+	go webhook.Start()
+
 	tgbot, err := NewTgBot(config.Telegram.Token, config.Telegram.Chats)
 	if err != nil {
 		panic(err)
@@ -124,5 +137,6 @@ func main() {
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
 	ibot.Stop()
+	webhook.Stop()
 	tgbot.Stop()
 }

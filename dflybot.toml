@@ -1,6 +1,14 @@
 # Logger level: debug, info, warn, error
 log_level = "info"
 
+# Webhook service to accept external notifications.
+[webhook]
+# Listen address, e.g., "127.0.0.1:2018"
+listen = "127.0.0.1:2018"
+# Bearer token to authenticate with (minimal length is 20 bytes).
+# e.g., openssl rand -base64 33
+token = "???"
+
 # The IRC to interact with.
 [irc]
 # Nickname

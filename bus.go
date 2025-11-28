@@ -17,7 +17,8 @@ import (
 type BusSource string
 
 const (
-	SourceIRC BusSource = "irc"
+	SourceIRC     BusSource = "irc"
+	SourceWebhook           = "webhook"
 )
 
 type Message struct {
