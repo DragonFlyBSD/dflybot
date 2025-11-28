@@ -21,11 +21,14 @@ const (
 )
 
 type Message struct {
-	Source    BusSource
-	Timestamp time.Time
-	From      string // nickname/user/from
-	Target    string // where the message was posted (#channel or nick)
-	Text      string // content
+	Source    BusSource `json:"source" validate:"required,oneof=irc webhook"`
+	Timestamp time.Time `json:"timestamp" validate:"required"`
+	// nickname/user/from
+	From string `json:"from" validate:"required"`
+	// where the message was posted (#channel or nick)
+	Target string `json:"target" validate:"required"`
+	// message content
+	Text string `json:"text" validate:"required"`
 }
 
 type Subscriber struct {
@@ -67,8 +70,14 @@ func (b *Bus) start() {
 	}
 }
 
-func (b *Bus) Produce(msg Message) {
+func (b *Bus) Produce(msg Message) error {
+	if err := validate.Struct(&msg); err != nil {
+		slog.Error("Bus message invalid", "message", msg, "error", err)
+		return err
+	}
+
 	b.in <- msg
+	return nil
 }
 
 func (b *Bus) Subscribe(name string, buffer int) *Subscriber {
