@@ -160,13 +160,21 @@ func (b *TgBot) Post(msg Message) {
 		return
 	}
 
-	text := strings.NewReplacer(
+	var text string
+	switch msg.Source {
+	case SourceIRC:
+		text = fmt.Sprintf("<b>[IRC %s]</b> ", msg.Target)
+	case SourceWebhook:
+		text = fmt.Sprintf("<b>[Webhook %s]</b> ", msg.Target)
+	default:
+		text = fmt.Sprintf("<b>[??? %s]</b> ", msg.Target)
+	}
+	text += fmt.Sprintf("<code>%s</code>💬 ", msg.From)
+	text += strings.NewReplacer(
 		"&", "&amp;",
 		"<", "&lt;",
 		">", "&gt;",
 	).Replace(msg.Text)
-	text = fmt.Sprintf("<b>[IRC %s]</b> <code>%s</code>💬 %s",
-		msg.Target, msg.From, text)
 
 	for _, chatID := range b.chats {
 		b.send(b.ctx, &bot.SendMessageParams{
