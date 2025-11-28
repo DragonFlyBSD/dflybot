@@ -146,6 +146,7 @@ func (b *IrcBot) tryCommand(text, target string) bool {
 		b.conn.Privmsg(target, "pong")
 		return true
 	default:
+		b.conn.Privmsg(target, "unknown command: "+cmd)
 		slog.Warn("IRC unknown command", "cmd", cmd, "args", args)
 		return false
 	}
