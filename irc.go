@@ -50,6 +50,7 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 	ic := irc.NewConfig(cfg.Nick)
 	ic.Server = net.JoinHostPort(cfg.Server, strconv.Itoa(int(cfg.Port)))
 	ic.Timeout = 30 * time.Second
+	ic.NewNick = func(old string) string { return old + "_" }
 	if cfg.SSL {
 		ic.SSL = true
 		ic.SSLConfig = &tls.Config{
