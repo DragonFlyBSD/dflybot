@@ -25,9 +25,10 @@ import (
 )
 
 const (
-	baseBackoff = 5 * time.Second
-	maxBackoff  = 5 * time.Minute
-	pingFreq    = 60 * time.Second
+	baseBackoff   = 5 * time.Second
+	maxBackoff    = 5 * time.Minute
+	pingFreq      = 60 * time.Second
+	nickCheckFreq = 60 * time.Second
 )
 
 type IrcConfig struct {
@@ -39,6 +40,7 @@ type IrcConfig struct {
 }
 
 type IrcBot struct {
+	nick     string
 	conn     *irc.Conn
 	channels map[string][]string
 	bus      *Bus
@@ -64,6 +66,7 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 
 	conn := irc.Client(ic)
 	ibot := &IrcBot{
+		nick:     cfg.Nick,
 		conn:     conn,
 		channels: cfg.Channels, // copy for the HandleFunc() closure below
 		bus:      bus,
@@ -127,6 +130,14 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 			ibot.tryAutoOp(ch, "")
 		}
 	})
+	conn.HandleFunc(irc.QUIT, func(_ *irc.Conn, _ *irc.Line) {
+		ibot.tryRecoverNick()
+	})
+	conn.HandleFunc(irc.NICK, func(c *irc.Conn, l *irc.Line) {
+		if l.Nick != c.Me().Nick {
+			ibot.tryRecoverNick()
+		}
+	})
 
 	return ibot
 }
@@ -150,6 +161,18 @@ func (b *IrcBot) tryCommand(text, target string) bool {
 		b.conn.Privmsg(target, "unknown command: "+cmd)
 		slog.Warn("IRC unknown command", "cmd", cmd, "args", args)
 		return false
+	}
+}
+
+func (b *IrcBot) tryRecoverNick() {
+	state := b.conn.StateTracker()
+	if me := state.Me().Nick; me == b.nick {
+		return
+	} else if state.GetNick(b.nick) == nil {
+		slog.Info("IRC tried to recover nick", "current", me, "wanted", b.nick)
+		b.conn.Nick(b.nick)
+	} else {
+		slog.Debug("IRC wanted nick not available", "nick", b.nick)
 	}
 }
 
@@ -211,6 +234,9 @@ func (b *IrcBot) Start() {
 
 	b.wg.Add(1)
 	go b.startWatchdog(ctx)
+
+	b.wg.Add(1)
+	go b.startNickCheck(ctx)
 
 	defer func() {
 		b.conn.Quit("shutting down; bye :P")
@@ -303,6 +329,24 @@ func (b *IrcBot) startWatchdog(ctx context.Context) {
 
 			b.conn.Ping(fmt.Sprintf("healthcheck-%d", time.Now().UnixNano()))
 			slog.Debug("IRC sent PING to server")
+		}
+	}
+}
+
+func (b *IrcBot) startNickCheck(ctx context.Context) {
+	defer b.wg.Done()
+
+	ticker := time.NewTicker(nickCheckFreq)
+	for {
+		select {
+		case <-ctx.Done():
+			ticker.Stop()
+			return
+		case <-ticker.C:
+			if !b.conn.Connected() {
+				continue
+			}
+			b.tryRecoverNick()
 		}
 	}
 }
