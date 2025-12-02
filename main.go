@@ -139,4 +139,5 @@ func main() {
 	ibot.Stop()
 	webhook.Stop()
 	tgbot.Stop()
+	bus.Close()
 }

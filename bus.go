@@ -71,6 +71,12 @@ func (b *Bus) start() {
 	}
 }
 
+func (b *Bus) Close() {
+	for s := range b.subscribers {
+		s.Close()
+	}
+}
+
 func (b *Bus) Produce(msg Message) error {
 	if err := validate.Struct(&msg); err != nil {
 		slog.Error("Bus message invalid", "message", msg, "error", err)
