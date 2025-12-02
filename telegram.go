@@ -155,6 +155,10 @@ func (b *TgBot) Stop() {
 }
 
 func (b *TgBot) Post(msg Message) {
+	if !strings.HasPrefix(msg.Target, "#") {
+		return // Ignore private messages.
+	}
+
 	if b.ctx == nil {
 		slog.Error("TG bot called but not started")
 		return
