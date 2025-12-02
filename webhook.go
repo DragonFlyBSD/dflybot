@@ -116,14 +116,20 @@ func (h *Webhook) authMiddleware(next http.Handler) http.Handler {
 }
 
 func (h *Webhook) Start() {
+	h.wg.Add(1)
 	defer h.wg.Done()
 
-	h.wg.Add(1)
 	h.server.Serve(h.listener)
 }
 
 func (h *Webhook) Stop() {
-	h.server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := h.server.Shutdown(ctx); err != nil {
+		slog.Error("Webhook shutdown failed", "error", err)
+		h.server.Close()
+	}
+
 	h.wg.Wait()
 	slog.Info("Webhook service stopped")
 }
