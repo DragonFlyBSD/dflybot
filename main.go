@@ -133,6 +133,13 @@ func main() {
 	}, bus)
 	go ibot.Start()
 
+	go func() {
+		sub := bus.Subscribe("irc", busBufferSize)
+		for msg := range sub.C {
+			ibot.Post(msg)
+		}
+	}()
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit

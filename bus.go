@@ -26,7 +26,7 @@ type Message struct {
 	Timestamp time.Time `json:"timestamp" validate:"required"`
 	// nickname/user/from
 	From string `json:"from" validate:"required"`
-	// where the message was posted (#channel or nick)
+	// where the message was posted or to post (#channel or nick)
 	Target string `json:"target" validate:"required"`
 	// message content
 	Text string `json:"text" validate:"required"`

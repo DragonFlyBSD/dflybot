@@ -361,3 +361,36 @@ func (b *IrcBot) Stop() {
 	b.wg.Wait()
 	slog.Info("IRC bot stopped")
 }
+
+func (b *IrcBot) Post(msg Message) {
+	if b.conn == nil || !b.conn.Connected() {
+		slog.Error("IRC bot not started/connected")
+		return
+	}
+
+	state := b.conn.StateTracker()
+	if strings.HasPrefix(msg.Target, "#") {
+		if state.GetChannel(msg.Target) == nil {
+			slog.Warn("IRC bot not joined", "channel", msg.Target)
+			return
+		}
+	} else {
+		if state.GetNick(msg.Target) == nil {
+			slog.Warn("IRC bot not seen", "nick", msg.Target)
+			return
+		}
+	}
+
+	var from string
+	switch msg.Source {
+	case SourceIRC:
+		from = fmt.Sprintf("[IRC %s]💬 ", msg.From)
+	case SourceWebhook:
+		from = fmt.Sprintf("[Webhook %s]💬 ", msg.From)
+	default:
+		from = fmt.Sprintf("[??? %s]💬 ", msg.From)
+	}
+	text := from + msg.Text
+	b.conn.Privmsg(msg.Target, text)
+	slog.Debug("IRC bot posted message", "target", msg.Target, "text", text)
+}
