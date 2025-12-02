@@ -125,7 +125,9 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 			return
 		}
 		ch, mode, target := l.Args[0], l.Args[1], l.Args[2]
-		if target == c.Me().Nick && mode == "+o" {
+		// NOTE: The mode arg may have multiple 'o' (e.g., "+ooo") when
+		// adding OP for multiple nicks.
+		if target == c.Me().Nick && strings.HasPrefix(mode, "+o") {
 			slog.Info("IRC bot gained MODE +o", "channel", ch)
 			ibot.tryAutoOp(ch, "")
 		}
