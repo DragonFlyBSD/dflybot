@@ -101,11 +101,9 @@ func (b *Bus) Subscribe(name string, buffer int) *Subscriber {
 
 	go func() {
 		<-ctx.Done()
+		close(s.C)
 		b.mu.Lock()
-		if _, ok := b.subscribers[s]; ok {
-			delete(b.subscribers, s)
-			close(s.C)
-		}
+		delete(b.subscribers, s)
 		b.mu.Unlock()
 	}()
 
