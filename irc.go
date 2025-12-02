@@ -363,6 +363,10 @@ func (b *IrcBot) Stop() {
 }
 
 func (b *IrcBot) Post(msg Message) {
+	if msg.Source == SourceIRC {
+		return // Ignore messages originated from self.
+	}
+
 	if b.conn == nil || !b.conn.Connected() {
 		slog.Error("IRC bot not started/connected")
 		return
