@@ -137,7 +137,7 @@ func main() {
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
 	ibot.Stop()
-	webhook.Stop()
 	tgbot.Stop()
+	webhook.Stop()
 	bus.Close()
 }
