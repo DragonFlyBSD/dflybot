@@ -24,6 +24,8 @@ import (
 	"time"
 
 	irc "github.com/fluffle/goirc/client"
+
+	ttlcache "github.com/liweitianux/dflybot/ttlcache"
 )
 
 const (
@@ -49,6 +51,7 @@ type IrcBot struct {
 	config *IrcConfig
 	conn   *irc.Conn
 	bus    *Bus
+	cache  *ttlcache.Cache
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
@@ -74,6 +77,7 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 		config: cfg,
 		conn:   conn,
 		bus:    bus,
+		cache:  ttlcache.New(opmeLeeway*2, 0, nil),
 	}
 
 	conn.EnableStateTracking()
@@ -209,6 +213,7 @@ func (b *IrcBot) handleOpMe(channel, nick, arg string) {
 		return
 	}
 	username, timestamp, mac := args[0], args[1], strings.ToLower(args[2])
+	authID := username + ":" + timestamp
 
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
@@ -239,13 +244,20 @@ func (b *IrcBot) handleOpMe(channel, nick, arg string) {
 	}
 
 	h := hmac.New(sha256.New, []byte(macKey))
-	h.Write([]byte(username + ":" + timestamp))
+	h.Write([]byte(authID))
 	expected := hex.EncodeToString(h.Sum(nil))
 	if expected != mac {
 		b.conn.Privmsg(nick, "opme denied")
 		slog.Debug("IRC opme mac invalid", "mac", mac, "expected", expected)
 		return
 	}
+
+	if _, exists := b.cache.Get(authID); exists {
+		b.conn.Privmsg(nick, "opme denied")
+		slog.Debug("IRC opme auth replayed", "authID", authID)
+		return
+	}
+	b.cache.Add(authID, struct{}{}, ttlcache.DefaultTTL)
 
 	b.conn.Mode(channel, "+o", nick)
 	slog.Info("IRC opme granted", "channel", channel, "nick", nick, "username", username)
@@ -375,6 +387,7 @@ func (b *IrcBot) startNickCheck(ctx context.Context) {
 }
 
 func (b *IrcBot) Stop() {
+	b.cache.Close()
 	if b.cancel != nil {
 		b.cancel()
 		b.cancel = nil
