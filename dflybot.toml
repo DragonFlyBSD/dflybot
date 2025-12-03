@@ -11,13 +11,13 @@ token = "???"
 
 # The IRC to interact with.
 [irc]
-# Nickname
+# My nickname
 nick = "dflybot"
 # Server address
 server = "irc.underworld.no"
 # Server port
 port = 6697
-# Whether to SSL?
+# Whether to use SSL?
 ssl = true
 # List of channels to join
 [[irc.channels]]
@@ -36,4 +36,10 @@ name = "#dragonflybsd"
 # The bot token.
 token = "???"
 # The Chat IDs where to post messages.
+# NOTE: To obtain this Chat ID:
+# 1. Fill the token above and start this program;
+# 2. Search the bot on Telegram and start a chat;
+# 3. Send "/start" and it will tell the Chat ID;
+# To obtain the Chat ID of a group chat, add the bot to the group and
+# send "/start" to the bot.
 chats = [???, ???]
