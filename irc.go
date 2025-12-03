@@ -40,12 +40,11 @@ type IrcConfig struct {
 }
 
 type IrcBot struct {
-	nick     string
-	conn     *irc.Conn
-	channels map[string][]string
-	bus      *Bus
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
+	config *IrcConfig
+	conn   *irc.Conn
+	bus    *Bus
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
 func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
@@ -66,16 +65,15 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 
 	conn := irc.Client(ic)
 	ibot := &IrcBot{
-		nick:     cfg.Nick,
-		conn:     conn,
-		channels: cfg.Channels, // copy for the HandleFunc() closure below
-		bus:      bus,
+		config: cfg,
+		conn:   conn,
+		bus:    bus,
 	}
 
 	conn.EnableStateTracking()
 	conn.HandleFunc(irc.CONNECTED, func(c *irc.Conn, _ *irc.Line) {
 		slog.Info("IRC connected", "server", c.Config().Server, "nick", c.Me().Nick)
-		for ch := range ibot.channels {
+		for ch := range ibot.config.Channels {
 			c.Join(ch)
 			slog.Info("IRC joined", "channel", ch)
 		}
@@ -167,14 +165,15 @@ func (b *IrcBot) tryCommand(text, target string) bool {
 }
 
 func (b *IrcBot) tryRecoverNick() {
+	nick := b.config.Nick
 	state := b.conn.StateTracker()
-	if me := state.Me().Nick; me == b.nick {
+	if me := state.Me().Nick; me == nick {
 		return
-	} else if state.GetNick(b.nick) == nil {
-		slog.Info("IRC tried to recover nick", "current", me, "wanted", b.nick)
-		b.conn.Nick(b.nick)
+	} else if state.GetNick(nick) == nil {
+		slog.Info("IRC tried to recover nick", "current", me, "wanted", nick)
+		b.conn.Nick(nick)
 	} else {
-		slog.Debug("IRC wanted nick not available", "nick", b.nick)
+		slog.Debug("IRC wanted nick not available", "nick", nick)
 	}
 }
 
@@ -198,7 +197,7 @@ func (b *IrcBot) hasModeOp(ch string) bool {
 }
 
 func (b *IrcBot) tryAutoOp(ch, nick string) {
-	opList, ok := b.channels[ch]
+	opList, ok := b.config.Channels[ch]
 	if !ok {
 		slog.Error("IRC auto list not found for", "channel", ch)
 		return
