@@ -9,12 +9,14 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +31,7 @@ const (
 	maxBackoff    = 5 * time.Minute
 	pingFreq      = 60 * time.Second
 	nickCheckFreq = 60 * time.Second
+	opmeLeeway    = 60 * time.Second
 )
 
 type IrcConfig struct {
@@ -36,7 +39,10 @@ type IrcConfig struct {
 	Server   string
 	Port     uint16
 	SSL      bool
-	Channels map[string][]string
+	Channels []struct {
+		Name string
+		OpMe map[string]string
+	}
 }
 
 type IrcBot struct {
@@ -73,9 +79,9 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 	conn.EnableStateTracking()
 	conn.HandleFunc(irc.CONNECTED, func(c *irc.Conn, _ *irc.Line) {
 		slog.Info("IRC connected", "server", c.Config().Server, "nick", c.Me().Nick)
-		for ch := range ibot.config.Channels {
-			c.Join(ch)
-			slog.Info("IRC joined", "channel", ch)
+		for _, ch := range ibot.config.Channels {
+			c.Join(ch.Name)
+			slog.Info("IRC joined", "channel", ch.Name)
 		}
 	})
 	conn.HandleFunc(irc.DISCONNECTED, func(c *irc.Conn, _ *irc.Line) {
@@ -94,8 +100,8 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 		}
 		if target := l.Target(); target == l.Nick {
 			// Private message to me.
-			ibot.tryCommand(text, target)
-		} else if !ibot.tryCommand(text, target) {
+			ibot.tryCommand(text, target, l)
+		} else if !ibot.tryCommand(text, target, l) {
 			ibot.bus.Produce(Message{
 				Source:    SourceIRC,
 				Timestamp: time.Now(),
@@ -103,31 +109,6 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 				Target:    target,
 				Text:      text,
 			})
-		}
-	})
-	conn.HandleFunc(irc.JOIN, func(c *irc.Conn, l *irc.Line) {
-		ch := l.Args[0]
-		if !ibot.hasModeOp(ch) {
-			slog.Info("IRC bot does not have MODE +o yet", "channel", ch)
-			return
-		}
-		if l.Nick == c.Me().Nick {
-			ibot.tryAutoOp(ch, "")
-		} else {
-			ibot.tryAutoOp(ch, l.Nick)
-		}
-	})
-	conn.HandleFunc(irc.MODE, func(c *irc.Conn, l *irc.Line) {
-		slog.Debug("IRC received MODE", "target", l.Target(), "sender", l.Nick, "args", l.Args)
-		if len(l.Args) < 3 {
-			return
-		}
-		ch, mode, target := l.Args[0], l.Args[1], l.Args[2]
-		// NOTE: The mode arg may have multiple 'o' (e.g., "+ooo") when
-		// adding OP for multiple nicks.
-		if target == c.Me().Nick && strings.HasPrefix(mode, "+o") {
-			slog.Info("IRC bot gained MODE +o", "channel", ch)
-			ibot.tryAutoOp(ch, "")
 		}
 	})
 	conn.HandleFunc(irc.QUIT, func(_ *irc.Conn, _ *irc.Line) {
@@ -142,24 +123,36 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 	return ibot
 }
 
-func (b *IrcBot) tryCommand(text, target string) bool {
+func (b *IrcBot) tryCommand(text, target string, l *irc.Line) bool {
 	if !strings.HasPrefix(text, "!") {
 		return false
 	}
 
-	cmd, args, _ := strings.Cut(strings.TrimPrefix(text, "!"), " ")
+	cmd, arg, _ := strings.Cut(strings.TrimPrefix(text, "!"), " ")
 	cmd = strings.ToLower(cmd)
-	args = strings.TrimSpace(args)
-	slog.Debug("IRC received command", "cmd", cmd, "args", args)
+	arg = strings.TrimSpace(arg)
+	slog.Debug("IRC received command", "cmd", cmd, "arg", arg)
 
 	// TODO: more commands
 	switch cmd {
 	case "ping":
 		b.conn.Privmsg(target, "pong")
 		return true
+	case "opme":
+		if !strings.HasPrefix(target, "#") {
+			b.conn.Privmsg(target, "command opme only works in channel")
+			return true
+		}
+		ch := target
+		if !b.hasModeOp(ch) {
+			b.conn.Privmsg(ch, l.Nick+": I don't have the permission yet")
+			return true
+		}
+		b.handleOpMe(ch, l.Nick, arg)
+		return true
 	default:
 		b.conn.Privmsg(target, "unknown command: "+cmd)
-		slog.Warn("IRC unknown command", "cmd", cmd, "args", args)
+		slog.Warn("IRC unknown command", "cmd", cmd, "arg", arg)
 		return false
 	}
 }
@@ -196,37 +189,66 @@ func (b *IrcBot) hasModeOp(ch string) bool {
 	return privs.Op
 }
 
-func (b *IrcBot) tryAutoOp(ch, nick string) {
-	opList, ok := b.config.Channels[ch]
-	if !ok {
-		slog.Error("IRC auto list not found for", "channel", ch)
+func (b *IrcBot) handleOpMe(channel, nick, arg string) {
+	var creds map[string]string
+	for _, ch := range b.config.Channels {
+		if ch.Name == channel {
+			creds = ch.OpMe
+			break
+		}
+	}
+	if creds == nil {
+		b.conn.Privmsg(nick, "unsupported opme channel: "+channel)
 		return
 	}
 
-	if nick == "" {
-		// Add +o for all online nicks in the auto list.
-		state := b.conn.StateTracker()
-		onList := make([]string, 0, len(opList))
-		for _, n := range opList {
-			if privs, ok := state.IsOn(ch, n); ok && !privs.Op {
-				onList = append(onList, n)
-			}
-		}
-		opList = onList
-	} else {
-		// Check the nick against the auto list and add +o if present.
-		if slices.Index(opList, nick) >= 0 {
-			opList = []string{nick}
-		} else {
-			slog.Debug("IRC ignored auto-op for", "channel", ch, "nick", nick)
-			return
-		}
+	// arg: <username>:<timestamp>:<hmac>
+	args := strings.Split(arg, ":")
+	if len(args) != 3 {
+		b.conn.Privmsg(nick, "invalid opme argument: "+arg)
+		return
+	}
+	username, timestamp, mac := args[0], args[1], strings.ToLower(args[2])
+
+	ts, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil {
+		b.conn.Privmsg(nick, "invalid opme argument: "+arg)
+		slog.Debug("IRC opme timestamp invalid", "timestamp", timestamp)
+		return
+	}
+	d := time.Since(time.Unix(ts, 0))
+	if d.Abs() > opmeLeeway {
+		b.conn.Privmsg(nick, "invalid opme argument: "+arg)
+		slog.Debug("IRC opme timestamp out-of-range", "timestamp", timestamp)
+		return
 	}
 
-	slog.Info("IRC auto-op", "channel", ch, "nicks", opList)
-	for _, n := range opList {
-		b.conn.Mode(ch, "+o", n)
+	// NOTE: The nick may be occupied by someone else, so don't require
+	// the sender has the exact nick as configured.
+	var macKey string
+	for n, k := range creds {
+		if n == username {
+			macKey = k
+			break
+		}
 	}
+	if macKey == "" {
+		b.conn.Privmsg(nick, "opme denied")
+		slog.Debug("IRC opme username invalid", "username", username)
+		return
+	}
+
+	h := hmac.New(sha256.New, []byte(macKey))
+	h.Write([]byte(username + ":" + timestamp))
+	expected := hex.EncodeToString(h.Sum(nil))
+	if expected != mac {
+		b.conn.Privmsg(nick, "opme denied")
+		slog.Debug("IRC opme mac invalid", "mac", mac, "expected", expected)
+		return
+	}
+
+	b.conn.Mode(channel, "+o", nick)
+	slog.Info("IRC opme granted", "channel", channel, "nick", nick, "username", username)
 }
 
 func (b *IrcBot) Start() {

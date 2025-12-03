@@ -19,12 +19,17 @@ server = "irc.underworld.no"
 port = 6697
 # Whether to SSL?
 ssl = true
-# Channels to join (must prefix with '#') and the list of nicknames to auto-op.
-[irc.channels]
-"#dragonflybsd" = [
-	"aly", "aly-", "aly_",
-	"dillon", "swildner", "tuxillo",
-]
+# List of channels to join
+[[irc.channels]]
+# The channel name (must prefix with '#')
+name = "#dragonflybsd"
+# The usernames and passwords to authenticate the "!opme" command
+# Usage:
+# sh$ t=$(date +%s)
+# sh$ mac=$(printf $username:$t | openssl mac -digest SHA256 -macopt key:$password HMAC)
+# irc> !opme $username:$t:$mac
+[irc.channels.op_me]
+# username = password
 
 # Telegram settings.
 [telegram]

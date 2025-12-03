@@ -45,9 +45,14 @@ type Config struct {
 		Port uint16 `toml:"port" validate:"port"`
 		// Whether to use SSL?
 		SSL bool `toml:"ssl"`
-		// Channels to join (must prefix with '#') and the list of
-		// nicknames to auto-op.
-		Channels map[string][]string `toml:"channels"`
+		// List of channels to join
+		Channels []struct {
+			// The channel name (must prefix with '#')
+			Name string `toml:"name" validate:"startswith=#"`
+			// The usernames and passwords to authenticate the
+			// "!opme" command
+			OpMe map[string]string `toml:"op_me"`
+		} `toml:"channels"`
 	} `toml:"irc" validate:"required"`
 	// Telegram settings.
 	Telegram struct {
@@ -124,13 +129,19 @@ func main() {
 		}
 	}()
 
-	ibot := NewIrcBot(&IrcConfig{
-		Nick:     config.IRC.Nick,
-		Server:   config.IRC.Server,
-		Port:     config.IRC.Port,
-		SSL:      config.IRC.SSL,
-		Channels: config.IRC.Channels,
-	}, bus)
+	icfg := &IrcConfig{
+		Nick:   config.IRC.Nick,
+		Server: config.IRC.Server,
+		Port:   config.IRC.Port,
+		SSL:    config.IRC.SSL,
+	}
+	for _, ch := range config.IRC.Channels {
+		icfg.Channels = append(icfg.Channels, struct {
+			Name string
+			OpMe map[string]string
+		}{ch.Name, ch.OpMe})
+	}
+	ibot := NewIrcBot(icfg, bus)
 	go ibot.Start()
 
 	go func() {
