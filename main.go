@@ -83,13 +83,13 @@ func main() {
 	config := Config{}
 	if _, err := toml.DecodeFile(*configFile, &config); err != nil {
 		slog.Error("failed to read config", "file", *configFile, "error", err)
-		panic(err)
+		os.Exit(1)
 	}
 	slog.Debug("read config", "file", *configFile, "data", config)
 
 	if err := validate.Struct(&config); err != nil {
 		slog.Error("invalid config", "error", err)
-		panic(err)
+		os.Exit(1)
 	}
 
 	if *isDebug {
@@ -112,13 +112,13 @@ func main() {
 
 	webhook, err := NewWebhook(config.Webhook.Listen, config.Webhook.Token, bus)
 	if err != nil {
-		panic(err)
+		os.Exit(1)
 	}
 	go webhook.Start()
 
 	tgbot, err := NewTgBot(config.Telegram.Token, config.Telegram.Chats)
 	if err != nil {
-		panic(err)
+		os.Exit(1)
 	}
 	go tgbot.Start()
 
