@@ -168,12 +168,18 @@ func (b *TgBot) Post(msg Message) {
 	switch msg.Source {
 	case SourceIRC:
 		text = fmt.Sprintf("<b>[IRC %s]</b> ", msg.Target)
+		if msg.Event == "ACTION" {
+			text += fmt.Sprintf("👉 <code>%s</code> ", msg.From)
+		} else {
+			text += fmt.Sprintf("<code>%s</code>💬 ", msg.From)
+		}
 	case SourceWebhook:
 		text = fmt.Sprintf("<b>[Webhook %s]</b> ", msg.Target)
+		text += fmt.Sprintf("<code>%s</code>📢 ", msg.From)
 	default:
-		text = fmt.Sprintf("<b>[??? %s]</b> ", msg.Target)
+		text = fmt.Sprintf("<b>[❓ %s]</b> ", msg.Target)
+		text += fmt.Sprintf("<code>%s</code> ", msg.From)
 	}
-	text += fmt.Sprintf("<code>%s</code>💬 ", msg.From)
 	text += strings.NewReplacer(
 		"&", "&amp;",
 		"<", "&lt;",
