@@ -24,6 +24,8 @@ const (
 type Message struct {
 	Source    BusSource `json:"source" validate:"required,oneof=irc webhook"`
 	Timestamp time.Time `json:"timestamp" validate:"required"`
+	// extra event info (e.g., IRC action)
+	Event string `json:"event"`
 	// nickname/user/from
 	From string `json:"from" validate:"required"`
 	// where the message was posted or to post (#channel or nick)

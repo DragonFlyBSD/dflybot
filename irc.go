@@ -123,6 +123,17 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 			ibot.tryRecoverNick()
 		}
 	})
+	conn.HandleFunc(irc.ACTION, func(c *irc.Conn, l *irc.Line) {
+		slog.Debug("IRC received action", "target", l.Target(), "sender", l.Nick, "text", l.Text())
+		ibot.bus.Produce(Message{
+			Source:    SourceIRC,
+			Timestamp: time.Now(),
+			Event:     "ACTION",
+			From:      l.Nick,
+			Target:    l.Target(),
+			Text:      l.Text(),
+		})
+	})
 
 	return ibot
 }
