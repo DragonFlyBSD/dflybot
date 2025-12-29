@@ -1,0 +1,25 @@
+# Logger level: debug, info, warn, error
+log_level = "info"
+
+# Work directory to hold the repos and states.
+# Can be a relative path to this config file.
+# NOTE: Must end with a slash (/).
+data_dir = "./data/"
+
+[webhook]
+# Webhook URL
+url = "http://127.0.0.1:2018/webhook"
+# Request method
+method = "POST"
+# Bearer token to authenticate
+token = "???"
+# Name to identify this tool
+from = "git-monitor"
+# Target to announce the messages
+target = "#dragonflybsd"
+
+[[repos]]
+enabled = true
+name = "dragonfly"
+url = "git://git.dragonflybsd.org/dragonfly.git"
+interval = 60  # seconds
