@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -109,15 +110,24 @@ func TestStateSaveLoad(t *testing.T) {
 	}
 
 	m := &Monitor{
-		Name:      "test",
-		StatePath: statePath,
-		state:     state,
+		config: &MonitorConfig{
+			Name:      "test",
+			StatePath: statePath,
+		},
+		state:  state,
+		logger: slog.Default(),
 	}
 	if err := m.saveState(); err != nil {
 		t.Fatal(err)
 	}
 
-	m2 := &Monitor{StatePath: statePath}
+	m2 := &Monitor{
+		config: &MonitorConfig{
+			Name:      "test",
+			StatePath: statePath,
+		},
+		logger: slog.Default(),
+	}
 	if err := m2.loadState(); err != nil {
 		t.Fatal(err)
 	}
@@ -140,12 +150,15 @@ func TestSeedState(t *testing.T) {
 	gitCommit(t, repo, "initial")
 
 	m := &Monitor{
-		Name:    "test",
-		RepoDir: repo + "/.git",
+		config: &MonitorConfig{
+			Name:    "test",
+			RepoDir: repo + "/.git",
+		},
 		state: State{
 			LastSeen: map[string]string{},
 			SeenTags: map[string]string{},
 		},
+		logger: slog.Default(),
 	}
 
 	if err := m.seedState(); err != nil {
@@ -163,12 +176,15 @@ func TestCommitAnnouncement(t *testing.T) {
 	first := gitCommit(t, repo, "first")
 
 	m := &Monitor{
-		Name:    "test",
-		RepoDir: repo + "/.git",
+		config: &MonitorConfig{
+			Name:    "test",
+			RepoDir: repo + "/.git",
+		},
 		state: State{
 			LastSeen: map[string]string{"branch:main": first},
 			SeenTags: map[string]string{},
 		},
+		logger: slog.Default(),
 	}
 
 	second := gitCommit(t, repo, "second")
@@ -192,12 +208,15 @@ func TestMergeCommit(t *testing.T) {
 	base := gitCommit(t, repo, "base")
 
 	m := &Monitor{
-		Name:    "test",
-		RepoDir: repo + "/.git",
+		config: &MonitorConfig{
+			Name:    "test",
+			RepoDir: repo + "/.git",
+		},
 		state: State{
 			LastSeen: map[string]string{"branch:main": base},
 			SeenTags: map[string]string{},
 		},
+		logger: slog.Default(),
 	}
 
 	gitMerge(t, repo)
@@ -223,12 +242,15 @@ func TestTagAnnouncement(t *testing.T) {
 	gitTag(t, repo, tag, sha)
 
 	m := &Monitor{
-		Name:    "test",
-		RepoDir: repo + "/.git",
+		config: &MonitorConfig{
+			Name:    "test",
+			RepoDir: repo + "/.git",
+		},
 		state: State{
 			LastSeen: map[string]string{},
 			SeenTags: map[string]string{},
 		},
+		logger: slog.Default(),
 	}
 
 	ans := m.collectAnnouncements()
@@ -252,12 +274,15 @@ func TestTagUpdate(t *testing.T) {
 	gitTag(t, repo, tag, sha)
 
 	m := &Monitor{
-		Name:    "test",
-		RepoDir: repo + "/.git",
+		config: &MonitorConfig{
+			Name:    "test",
+			RepoDir: repo + "/.git",
+		},
 		state: State{
 			LastSeen: map[string]string{},
 			SeenTags: map[string]string{},
 		},
+		logger: slog.Default(),
 	}
 
 	m.collectAnnouncements()
@@ -322,8 +347,11 @@ func TestSendAnnouncements_Empty(t *testing.T) {
 	poster := newTestPoster(512)
 
 	m := &Monitor{
-		Name:   "test",
-		Poster: poster,
+		config: &MonitorConfig{
+			Name:   "test",
+			Poster: poster,
+		},
+		logger: slog.Default(),
 	}
 
 	m.sendAnnouncements(ctx, nil)
@@ -338,8 +366,11 @@ func TestSendAnnouncements_Basic(t *testing.T) {
 	poster := newTestPoster(1024)
 
 	m := &Monitor{
-		Name:   "testproj",
-		Poster: poster,
+		config: &MonitorConfig{
+			Name:   "testproj",
+			Poster: poster,
+		},
+		logger: slog.Default(),
 	}
 
 	ans := []*announcement{
@@ -442,8 +473,11 @@ func TestSendAnnouncements_Batching(t *testing.T) {
 	poster := newTestPoster(80) // Small max length to force batching
 
 	m := &Monitor{
-		Name:   "test",
-		Poster: poster,
+		config: &MonitorConfig{
+			Name:   "testproj",
+			Poster: poster,
+		},
+		logger: slog.Default(),
 	}
 
 	var ans []*announcement

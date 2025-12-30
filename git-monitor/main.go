@@ -126,14 +126,14 @@ func main() {
 			slog.Info("skip disabled repo", "name", repo.Name, "url", repo.URL)
 			continue
 		}
-		monitor := &Monitor{
+		monitor := NewMonitor(&MonitorConfig{
 			Name:      repo.Name,
 			RepoURL:   repo.URL,
 			RepoDir:   filepath.Join(config.DataDir, repo.Name+".git"),
 			StatePath: filepath.Join(config.DataDir, repo.Name+".state"),
 			Interval:  time.Duration(repo.Interval) * time.Second,
 			Poster:   webhook,
-		}
+		}, nil)
 		wg.Add(1)
 		go monitor.Start(ctx, wg)
 	}

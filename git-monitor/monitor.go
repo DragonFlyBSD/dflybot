@@ -23,6 +23,22 @@ import (
 	"time"
 )
 
+type MonitorConfig struct {
+	Name      string
+	RepoURL   string
+	RepoDir   string
+	StatePath string
+	Interval  time.Duration
+	Poster    Poster
+}
+
+type Monitor struct {
+	config *MonitorConfig
+	state  State
+	mutex  sync.Mutex
+	logger *slog.Logger
+}
+
 // State persisted to disk to avoid duplicates.
 type State struct {
 	// map ref name -> last announced commit sha
@@ -40,28 +56,25 @@ type Poster interface {
 	Post(ctx context.Context, text string) error
 }
 
-type Monitor struct {
-	Name      string
-	RepoURL   string
-	RepoDir   string
-	StatePath string
-	Interval  time.Duration
-	Poster    Poster
+func NewMonitor(cfg *MonitorConfig, base *slog.Logger) *Monitor {
+	if base == nil {
+		base = slog.Default()
+	}
+	logger := base.With(slog.String("repo", cfg.Name))
 
-	state     State
-	mutex     sync.Mutex
-	logprefix string
+	return &Monitor{
+		config: cfg,
+		logger: logger,
+	}
 }
 
 func (m *Monitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 	defer func() {
 		if err := m.saveState(); err != nil {
-			slog.Warn(m.logprefix+"state save failed", "error", err)
+			m.logger.Warn("state save failed", "error", err)
 		}
 		wg.Done()
 	}()
-
-	m.logprefix = fmt.Sprintf("[%s] ", m.Name)
 
 	if m.loadState() != nil {
 		return
@@ -73,10 +86,10 @@ func (m *Monitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 		return
 	}
 	if err := m.saveState(); err != nil {
-		slog.Warn(m.logprefix+"state save failed", "error", err)
+		m.logger.Warn("state save failed", "error", err)
 	}
 
-	ticker := time.NewTicker(m.Interval)
+	ticker := time.NewTicker(m.config.Interval)
 	defer ticker.Stop()
 	for {
 		if m.updateRepo(ctx) == nil {
@@ -84,7 +97,7 @@ func (m *Monitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 			if len(ans) > 0 {
 				m.sendAnnouncements(ctx, ans)
 				if err := m.saveState(); err != nil {
-					slog.Warn(m.logprefix+"state save failed", "error", err)
+					m.logger.Warn("state save failed", "error", err)
 				}
 			}
 		}
@@ -92,7 +105,7 @@ func (m *Monitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 
 		select {
 		case <-ctx.Done():
-			slog.Debug("monitor exiting")
+			m.logger.Debug("monitor exiting")
 			return
 		case <-ticker.C:
 		}
@@ -101,18 +114,18 @@ func (m *Monitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 
 func (m *Monitor) loadState() error {
 	var state State
-	path := m.StatePath
+	path := m.config.StatePath
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		slog.Debug(m.logprefix+"state file not exist", "path", path)
+		m.logger.Debug("state file not exist", "path", path)
 		return nil
 	} else {
 		b, err := os.ReadFile(path)
 		if err != nil {
-			slog.Error(m.logprefix+"state file read failure", "path", path, "error", err)
+			m.logger.Error("state file read failure", "path", path, "error", err)
 			return err
 		}
 		if err := json.Unmarshal(b, &state); err != nil {
-			slog.Error(m.logprefix+"state file unmarshal failure", "path", path, "error", err)
+			m.logger.Error("state file unmarshal failure", "path", path, "error", err)
 			return err
 		}
 	}
@@ -128,7 +141,7 @@ func (m *Monitor) loadState() error {
 	m.state = state
 	m.mutex.Unlock()
 
-	slog.Info(m.logprefix+"state loaded", "file", path)
+	m.logger.Info("state loaded", "file", path)
 	return nil
 }
 
@@ -142,7 +155,7 @@ func (m *Monitor) saveState() error {
 		return fmt.Errorf("state marshal failure: %w", err)
 	}
 
-	path := m.StatePath
+	path := m.config.StatePath
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
 		return fmt.Errorf("state file (%s) write failure: %w", tmp, err)
@@ -151,7 +164,7 @@ func (m *Monitor) saveState() error {
 		return fmt.Errorf("state file rename (%s -> %s) failure: %w", tmp, path, err)
 	}
 
-	slog.Info(m.logprefix+"state saved", "file", path)
+	m.logger.Info("state saved", "file", path)
 	return nil
 }
 
@@ -165,7 +178,7 @@ func (m *Monitor) seedState() error {
 		return nil
 	}
 
-	slog.Info(m.logprefix + "seeding state with current repo tips")
+	m.logger.Info("seeding state with current repo tips")
 	// branches
 	refs, err := m.listRefs("refs/heads")
 	if err != nil {
@@ -190,21 +203,21 @@ func (m *Monitor) cloneRepo(ctx context.Context) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	if _, err := os.Stat(m.RepoDir); err == nil {
-		slog.Debug(m.logprefix+"repo directory already exists", "dir", m.RepoDir)
+	if _, err := os.Stat(m.config.RepoDir); err == nil {
+		m.logger.Debug("repo directory already exists", "dir", m.config.RepoDir)
 		return nil
 	}
 
-	slog.Info(m.logprefix+"cloning repo", "url", m.RepoURL, "dir", m.RepoDir)
-	cmd := exec.CommandContext(ctx, "git", "clone", "--mirror", m.RepoURL, m.RepoDir)
+	m.logger.Info("cloning repo", "url", m.config.RepoURL, "dir", m.config.RepoDir)
+	cmd := exec.CommandContext(ctx, "git", "clone", "--mirror", m.config.RepoURL, m.config.RepoDir)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		slog.Error(m.logprefix+"repo clone failed", "command", cmd, "error", err)
+		m.logger.Error("repo clone failed", "command", cmd, "error", err)
 		return err
 	}
 
-	slog.Info(m.logprefix+"repo cloned", "command", cmd)
+	m.logger.Info("repo cloned", "command", cmd)
 	return nil
 }
 
@@ -212,20 +225,20 @@ func (m *Monitor) updateRepo(ctx context.Context) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	cmd := exec.CommandContext(ctx, "git", "--git-dir="+m.RepoDir,
+	cmd := exec.CommandContext(ctx, "git", "--git-dir="+m.config.RepoDir,
 		"remote", "update", "--prune")
-	slog.Debug(m.logprefix+"updating repo", "command", cmd)
+	m.logger.Debug("updating repo", "command", cmd)
 
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err := cmd.Run(); err != nil {
-		slog.Error(m.logprefix+"repo update failed", "command", cmd,
+		m.logger.Error("repo update failed", "command", cmd,
 			"error", err, "output", out.String())
 		return err
 	}
 
-	slog.Debug(m.logprefix + "repo updated")
+	m.logger.Debug("repo updated")
 	return nil
 }
 
@@ -325,7 +338,7 @@ func (m *Monitor) collectAnnouncements() []*announcement {
 		}
 	}
 
-	slog.Debug(m.logprefix+"collected announcements", "count", len(ans))
+	m.logger.Debug("collected announcements", "count", len(ans))
 	return ans
 }
 
@@ -340,10 +353,10 @@ func (m *Monitor) sendAnnouncements(ctx context.Context, ans []*announcement) {
 			tag += " (updated)"
 		}
 		msg := fmt.Sprintf("[%s] %s %s <%s> (%s) %s",
-			m.Name, tag, a.info.AuthorName, a.info.AuthorEmail,
+			m.config.Name, tag, a.info.AuthorName, a.info.AuthorEmail,
 			shortSHA(a.info.Hash), sanitize(a.info.Subject))
-		slog.Info(m.logprefix+"announce tag", "tag", a.tag, "msg", msg)
-		m.Poster.Post(ctx, msg)
+		m.logger.Info("announce tag", "tag", a.tag, "msg", msg)
+		m.config.Poster.Post(ctx, msg)
 	}
 
 	// Announce commits: branch by branch
@@ -371,9 +384,9 @@ func (m *Monitor) sendAnnouncements(ctx context.Context, ans []*announcement) {
 	const separator = " || "
 	for _, b := range branches {
 		bmsgs := msgs[b]
-		slog.Info(m.logprefix+"announce commits", "branch", b, "count", len(bmsgs))
-		prompt := fmt.Sprintf("[%s:%s] ", m.Name, b)
-		maxLen := m.Poster.GetMaxLength() - len(prompt)
+		m.logger.Info("announce commits", "branch", b, "count", len(bmsgs))
+		prompt := fmt.Sprintf("[%s:%s] ", m.config.Name, b)
+		maxLen := m.config.Poster.GetMaxLength() - len(prompt)
 		curLen := 0
 		var batch []string
 		for _, am := range bmsgs {
@@ -387,9 +400,9 @@ func (m *Monitor) sendAnnouncements(ctx context.Context, ans []*announcement) {
 				curLen += sepLen + amLen
 			} else {
 				msg := prompt + strings.Join(batch, separator)
-				slog.Info(m.logprefix+"announce commits in batch",
+				m.logger.Info("announce commits in batch",
 					"count", len(batch), "msg", msg)
-				m.Poster.Post(ctx, msg)
+				m.config.Poster.Post(ctx, msg)
 				// start a new batch
 				batch = []string{am}
 				curLen = amLen
@@ -398,22 +411,22 @@ func (m *Monitor) sendAnnouncements(ctx context.Context, ans []*announcement) {
 		// send the final batch
 		if len(batch) > 0 {
 			msg := prompt + strings.Join(batch, separator)
-			slog.Info(m.logprefix+"announce commits in batch",
+			m.logger.Info("announce commits in batch",
 				"count", len(batch), "msg", msg)
-			m.Poster.Post(ctx, msg)
+			m.config.Poster.Post(ctx, msg)
 		}
 	}
 }
 
 // listRefs returns map of shortname->sha for refs under the provided prefix.
 func (m *Monitor) listRefs(prefix string) (map[string]string, error) {
-	cmd := exec.Command("git", "--git-dir="+m.RepoDir, "for-each-ref",
+	cmd := exec.Command("git", "--git-dir="+m.config.RepoDir, "for-each-ref",
 		"--format=%(refname:short) %(objectname)", prefix)
-	slog.Debug(m.logprefix+"listing repo refs", "prefix", prefix, "command", cmd)
+	m.logger.Debug("listing repo refs", "prefix", prefix, "command", cmd)
 
 	out, err := cmd.Output()
 	if err != nil {
-		slog.Error(m.logprefix+"repo listing refs failed", "command", cmd,
+		m.logger.Error("repo listing refs failed", "command", cmd,
 			"error", err, "output", string(out))
 		return nil, err
 	}
@@ -427,14 +440,14 @@ func (m *Monitor) listRefs(prefix string) (map[string]string, error) {
 		}
 		parts := strings.Split(line, " ")
 		if len(parts) != 2 {
-			slog.Warn(m.logprefix+"ignore invalid ref", "line", line)
+			m.logger.Warn("ignore invalid ref", "line", line)
 			continue
 		}
 		name, sha := parts[0], parts[1]
 		refs[name] = sha
 	}
 	if err := scanner.Err(); err != nil {
-		slog.Warn(m.logprefix+"repo refs scanning failure", "error", err)
+		m.logger.Warn("repo refs scanning failure", "error", err)
 		return nil, err
 	}
 
@@ -444,13 +457,13 @@ func (m *Monitor) listRefs(prefix string) (map[string]string, error) {
 // revList returns list of commit SHAs from old..new (exclusive of old,
 // inclusive of new) reversed to oldest->newest.
 func (m *Monitor) revList(oldSHA, newSHA string) ([]string, error) {
-	cmd := exec.Command("git", "--git-dir="+m.RepoDir, "rev-list",
+	cmd := exec.Command("git", "--git-dir="+m.config.RepoDir, "rev-list",
 		"--reverse", fmt.Sprintf("%s..%s", oldSHA, newSHA))
-	slog.Debug(m.logprefix+"listing commits", "command", cmd)
+	m.logger.Debug("listing commits", "command", cmd)
 
 	out, err := cmd.Output()
 	if err != nil {
-		slog.Error(m.logprefix+"repo listing commits failed", "command", cmd,
+		m.logger.Error("repo listing commits failed", "command", cmd,
 			"error", err, "output", string(out))
 		return nil, err
 	}
@@ -464,7 +477,7 @@ func (m *Monitor) revList(oldSHA, newSHA string) ([]string, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		slog.Warn(m.logprefix+"repo commits scanning failure", "error", err)
+		m.logger.Warn("repo commits scanning failure", "error", err)
 		return nil, err
 	}
 
@@ -481,11 +494,11 @@ type commitInfo struct {
 
 // getCommitInfo extracts commit metadata using git show -s --format=...
 func (m *Monitor) getCommitInfo(sha string) (*commitInfo, error) {
-	cmd := exec.Command("git", "--git-dir="+m.RepoDir, "show",
+	cmd := exec.Command("git", "--git-dir="+m.config.RepoDir, "show",
 		"--no-patch", "--format=%H%n%an%n%ae%n%ad%n%s", sha)
 	out, err := cmd.Output()
 	if err != nil {
-		slog.Error(m.logprefix+"show sha failed", "command", cmd,
+		m.logger.Error("show sha failed", "command", cmd,
 			"error", err, "output", string(out))
 		return nil, err
 	}
@@ -503,11 +516,11 @@ func (m *Monitor) getCommitInfo(sha string) (*commitInfo, error) {
 
 // isMergeCommit returns true if commit has more than one parent
 func (m *Monitor) isMergeCommit(sha string) (bool, error) {
-	cmd := exec.Command("git", "--git-dir="+m.RepoDir, "rev-list",
+	cmd := exec.Command("git", "--git-dir="+m.config.RepoDir, "rev-list",
 		"--parents", "-n", "1", sha)
 	out, err := cmd.Output()
 	if err != nil {
-		slog.Error(m.logprefix+"rev-list parents failed", "command", cmd,
+		m.logger.Error("rev-list parents failed", "command", cmd,
 			"error", err, "output", string(out))
 		return false, err
 	}
@@ -522,11 +535,11 @@ func (m *Monitor) isMergeCommit(sha string) (bool, error) {
 
 // derefTagToCommit tries to resolve a tag name to the commit SHA it points to.
 func (m *Monitor) derefTagToCommit(tag string) (string, error) {
-	cmd := exec.Command("git", "--git-dir="+m.RepoDir, "rev-parse",
+	cmd := exec.Command("git", "--git-dir="+m.config.RepoDir, "rev-parse",
 		"--verify", tag+"^{commit}")
 	out, err := cmd.Output()
 	if err != nil {
-		slog.Error(m.logprefix+"rev-parse tag->commit failed", "command", cmd,
+		m.logger.Error("rev-parse tag->commit failed", "command", cmd,
 			"error", err, "output", string(out))
 		return "", err
 	}
