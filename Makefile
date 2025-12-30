@@ -3,3 +3,4 @@ all:
 	go mod tidy
 	go vet ./...
 	env CGO_ENABLED=0 go build -v -trimpath
+	make -C git-monitor
