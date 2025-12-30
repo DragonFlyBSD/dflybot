@@ -8,10 +8,13 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -277,5 +280,196 @@ func TestTagUpdate(t *testing.T) {
 	}
 	if ans[0].info.Hash != sha {
 		t.Fatalf("tag points to wrong commit %q, expected %q", ans[0].info.Hash, sha)
+	}
+}
+
+//------------------------------------------------------------------------------
+
+type testPoster struct {
+	mu       sync.Mutex
+	maxLen   int
+	messages []string
+}
+
+func newTestPoster(maxLen int) *testPoster {
+	return &testPoster{
+		maxLen:   maxLen,
+		messages: []string{},
+	}
+}
+
+func (p *testPoster) GetMaxLength() int {
+	return p.maxLen
+}
+
+func (p *testPoster) Post(ctx context.Context, text string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.messages = append(p.messages, text)
+	return nil
+}
+
+func (p *testPoster) Messages() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cp := make([]string, len(p.messages))
+	copy(cp, p.messages)
+	return cp
+}
+
+func TestSendAnnouncements_Empty(t *testing.T) {
+	ctx := context.Background()
+	poster := newTestPoster(512)
+
+	m := &Monitor{
+		Name:   "test",
+		Poster: poster,
+	}
+
+	m.sendAnnouncements(ctx, nil)
+
+	if len(poster.Messages()) != 0 {
+		t.Fatalf("expected no messages, got %v", poster.Messages())
+	}
+}
+
+func TestSendAnnouncements_Basic(t *testing.T) {
+	ctx := context.Background()
+	poster := newTestPoster(1024)
+
+	m := &Monitor{
+		Name:   "testproj",
+		Poster: poster,
+	}
+
+	ans := []*announcement{
+		// New tag
+		{
+			tag: "v1.0.0",
+			info: &commitInfo{
+				Hash:        "aaaaaaaaaa",
+				AuthorName:  "Alice",
+				AuthorEmail: "alice@example.com",
+				Subject:     "release v1.0.0",
+			},
+		},
+		// Updated tag
+		{
+			tag:        "v1.0.1",
+			tagUpdated: true,
+			info: &commitInfo{
+				Hash:        "bbbbbbbbbb",
+				AuthorName:  "Bob",
+				AuthorEmail: "bob@example.com",
+				Subject:     "retag v1.0.1",
+			},
+		},
+		// Normal commit on master
+		{
+			branch: "master",
+			info: &commitInfo{
+				Hash:        "cccccccccc",
+				AuthorName:  "Carol",
+				AuthorEmail: "carol@example.com",
+				Subject:     "fix bug",
+			},
+		},
+		// Merge commit on master
+		{
+			branch:  "master",
+			isMerge: true,
+			info: &commitInfo{
+				Hash:        "dddddddddd",
+				AuthorName:  "Dave",
+				AuthorEmail: "dave@example.com",
+				Subject:     "merge feature",
+			},
+		},
+		// Commits on develop
+		{
+			branch: "develop",
+			info: &commitInfo{
+				Hash:        "eeeeeeeeee",
+				AuthorName:  "Eve",
+				AuthorEmail: "eve@example.com",
+				Subject:     "add feature",
+			},
+		},
+		{
+			branch: "develop",
+			info: &commitInfo{
+				Hash:        "ffffffffff",
+				AuthorName:  "Foo",
+				AuthorEmail: "foo@example.com",
+				Subject:     "add feature 2",
+			},
+		},
+	}
+
+	m.sendAnnouncements(ctx, ans)
+
+	msgs := poster.Messages()
+	if len(msgs) != 4 {
+		t.Fatalf("expected 4 messages, got %d:\n%v", len(msgs), msgs)
+	}
+
+	msgTag1, msgTag2, msgDevelop, msgMaster := msgs[0], msgs[1], msgs[2], msgs[3]
+
+	// Tags first
+	if !strings.Contains(msgTag1, "[testproj] tag:v1.0.0") {
+		t.Errorf("unexpected tag msg: %s", msgTag1)
+	}
+	if !strings.Contains(msgTag2, "tag:v1.0.1 (updated)") {
+		t.Errorf("expected updated tag msg, got: %s", msgTag2)
+	}
+
+	// Branch ordering: develop, master
+	if !strings.HasPrefix(msgDevelop, "[testproj:develop]") {
+		t.Errorf("expected develop branch msg, got: %s", msgDevelop)
+	}
+	if !strings.HasPrefix(msgMaster, "[testproj:master]") {
+		t.Errorf("expected master branch msg, got: %s", msgMaster)
+	}
+
+	// Merge commit annotation
+	if !strings.Contains(msgMaster, "(merge)") {
+		t.Errorf("expected merge annotation, got: %s", msgMaster)
+	}
+}
+
+func TestSendAnnouncements_Batching(t *testing.T) {
+	ctx := context.Background()
+	poster := newTestPoster(80) // Small max length to force batching
+
+	m := &Monitor{
+		Name:   "test",
+		Poster: poster,
+	}
+
+	var ans []*announcement
+	for i := 0; i < 5; i++ {
+		ans = append(ans, &announcement{
+			branch: "master",
+			info: &commitInfo{
+				Hash:        fmt.Sprintf("hash%d", i),
+				AuthorName:  "Author",
+				AuthorEmail: "a@example.com",
+				Subject:     fmt.Sprintf("commit number %d", i),
+			},
+		})
+	}
+
+	m.sendAnnouncements(ctx, ans)
+
+	msgs := poster.Messages()
+	if len(msgs) < 2 {
+		t.Fatalf("expected batching, got %d messages", len(msgs))
+	}
+
+	for _, msg := range msgs {
+		if len([]byte(msg)) > poster.GetMaxLength() {
+			t.Errorf("message exceeds max length: %d > %d\n%s",
+				len([]byte(msg)), poster.GetMaxLength(), msg)
+		}
 	}
 }
