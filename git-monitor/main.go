@@ -132,7 +132,7 @@ func main() {
 			RepoDir:   filepath.Join(config.DataDir, repo.Name+".git"),
 			StatePath: filepath.Join(config.DataDir, repo.Name+".state"),
 			Interval:  time.Duration(repo.Interval) * time.Second,
-			Webhook:   webhook,
+			Poster:   webhook,
 		}
 		wg.Add(1)
 		go monitor.Start(ctx, wg)

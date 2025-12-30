@@ -23,11 +23,6 @@ import (
 	"time"
 )
 
-const (
-	// Webhook message max length
-	msgMaxLength = 400
-)
-
 // State persisted to disk to avoid duplicates.
 type State struct {
 	// map ref name -> last announced commit sha
@@ -38,13 +33,20 @@ type State struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+type Poster interface {
+	// Get the max message length
+	GetMaxLength() int
+	// Post the text message
+	Post(ctx context.Context, text string) error
+}
+
 type Monitor struct {
 	Name      string
 	RepoURL   string
 	RepoDir   string
 	StatePath string
 	Interval  time.Duration
-	Webhook   *Webhook
+	Poster    Poster
 
 	state     State
 	mutex     sync.Mutex
@@ -341,7 +343,7 @@ func (m *Monitor) sendAnnouncements(ctx context.Context, ans []*announcement) {
 			m.Name, tag, a.info.AuthorName, a.info.AuthorEmail,
 			shortSHA(a.info.Hash), sanitize(a.info.Subject))
 		slog.Info(m.logprefix+"announce tag", "tag", a.tag, "msg", msg)
-		m.Webhook.Post(ctx, msg)
+		m.Poster.Post(ctx, msg)
 	}
 
 	// Announce commits: branch by branch
@@ -371,7 +373,7 @@ func (m *Monitor) sendAnnouncements(ctx context.Context, ans []*announcement) {
 		bmsgs := msgs[b]
 		slog.Info(m.logprefix+"announce commits", "branch", b, "count", len(bmsgs))
 		prompt := fmt.Sprintf("[%s:%s] ", m.Name, b)
-		maxLen := msgMaxLength - len(prompt)
+		maxLen := m.Poster.GetMaxLength() - len(prompt)
 		curLen := 0
 		var batch []string
 		for _, am := range bmsgs {
@@ -387,7 +389,7 @@ func (m *Monitor) sendAnnouncements(ctx context.Context, ans []*announcement) {
 				msg := prompt + strings.Join(batch, separator)
 				slog.Info(m.logprefix+"announce commits in batch",
 					"count", len(batch), "msg", msg)
-				m.Webhook.Post(ctx, msg)
+				m.Poster.Post(ctx, msg)
 				// start a new batch
 				batch = []string{am}
 				curLen = amLen
@@ -398,7 +400,7 @@ func (m *Monitor) sendAnnouncements(ctx context.Context, ans []*announcement) {
 			msg := prompt + strings.Join(batch, separator)
 			slog.Info(m.logprefix+"announce commits in batch",
 				"count", len(batch), "msg", msg)
-			m.Webhook.Post(ctx, msg)
+			m.Poster.Post(ctx, msg)
 		}
 	}
 }

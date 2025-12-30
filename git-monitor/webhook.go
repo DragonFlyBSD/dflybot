@@ -58,6 +58,10 @@ func NewWebhook(cfg *ConfigWebhook) *Webhook {
 	}
 }
 
+func (w *Webhook) GetMaxLength() int {
+	return 400 // shorter than the IRC split length (default 450)
+}
+
 func (w *Webhook) Post(ctx context.Context, text string) error {
 	var payload = struct {
 		From   string `json:"from"`
