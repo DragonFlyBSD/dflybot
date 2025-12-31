@@ -87,13 +87,19 @@ func gitMerge(t *testing.T, dir string) {
 }
 
 // Helper: tag the given commit
-func gitTag(t *testing.T, dir string, tag string, ref string) {
+func gitTag(t *testing.T, dir string, tag string, ref string, msg string) {
 	t.Helper()
 
 	if ref == "" {
 		ref = "HEAD"
 	}
-	cmd := exec.Command("git", "tag", "-f", tag, ref)
+	args := []string{"tag", "-f", tag, ref}
+	if msg != "" {
+		// Create one annotated tag.
+		args = []string{"tag", "-f", "-a", "-m", msg, tag, ref}
+	}
+
+	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git command (%s) failed: %v (%s)", cmd.String(), err, out)
@@ -239,7 +245,7 @@ func TestTagAnnouncement(t *testing.T) {
 	tag := "v1.0"
 
 	sha := gitCommit(t, repo, "release")
-	gitTag(t, repo, tag, sha)
+	gitTag(t, repo, tag, sha, "")
 
 	m := &Monitor{
 		config: &MonitorConfig{
@@ -260,6 +266,9 @@ func TestTagAnnouncement(t *testing.T) {
 	if ans[0].tag != tag {
 		t.Fatalf("expected announcement for tag %q, got %q", tag, ans[0].tag)
 	}
+	if ans[0].tagUpdated {
+		t.Fatalf("did not expect updated tag")
+	}
 	if ans[0].info.Hash != sha {
 		t.Fatalf("tag points to wrong commit %q, expected %q", ans[0].info.Hash, sha)
 	}
@@ -271,7 +280,7 @@ func TestTagUpdate(t *testing.T) {
 	tag := "v1.0"
 
 	sha := gitCommit(t, repo, "release")
-	gitTag(t, repo, tag, sha)
+	gitTag(t, repo, tag, sha, "")
 
 	m := &Monitor{
 		config: &MonitorConfig{
@@ -291,7 +300,117 @@ func TestTagUpdate(t *testing.T) {
 
 	m.collectAnnouncements()
 
-	gitTag(t, repo, tag, sha)
+	gitTag(t, repo, tag, sha, "")
+
+	ans := m.collectAnnouncements()
+	if len(ans) != 1 {
+		t.Fatalf("expected 1 announcement, got %d", len(ans))
+	}
+	if ans[0].tag != tag {
+		t.Fatalf("expected announcement for tag %q, got %q", tag, ans[0].tag)
+	}
+	if !ans[0].tagUpdated {
+		t.Fatalf("expected tag updated")
+	}
+	if ans[0].info.Hash != sha {
+		t.Fatalf("tag points to wrong commit %q, expected %q", ans[0].info.Hash, sha)
+	}
+}
+
+// Test: seed state with annotated tags -> no announcement
+func TestAnnotatedTag_SeedState_NoAnnouncement(t *testing.T) {
+	repo := newTestRepo(t)
+	tag := "v1.0"
+
+	sha := gitCommit(t, repo, "release")
+	gitTag(t, repo, tag, sha, "annotated "+tag)
+
+	m := &Monitor{
+		config: &MonitorConfig{
+			Name:    "test",
+			RepoDir: repo + "/.git",
+		},
+		state: State{
+			LastSeen: map[string]string{},
+			SeenTags: map[string]string{},
+		},
+		logger: slog.Default(),
+	}
+
+	// Seed state (records existing tags)
+	if err := m.seedState(); err != nil {
+		t.Fatalf("seedState failed: %v", err)
+	}
+
+	// No new tags should be announced
+	ans := m.collectAnnouncements()
+	if len(ans) != 0 {
+		t.Fatalf("expected no announcements, got %d", len(ans))
+	}
+}
+
+// Test: create a new annotated tag -> new announcement
+func TestAnnotatedTag_NewAnnouncement(t *testing.T) {
+	repo := newTestRepo(t)
+	tag := "v1.0"
+
+	sha := gitCommit(t, repo, "release")
+	gitTag(t, repo, tag, sha, "annotated "+tag)
+
+	m := &Monitor{
+		config: &MonitorConfig{
+			Name:    "test",
+			RepoDir: repo + "/.git",
+		},
+		state: State{
+			LastSeen: map[string]string{},
+			SeenTags: map[string]string{},
+		},
+		logger: slog.Default(),
+	}
+
+	ans := m.collectAnnouncements()
+	if len(ans) != 1 {
+		t.Fatalf("expected 1 announcement, got %d", len(ans))
+	}
+	if ans[0].tag != tag {
+		t.Fatalf("expected announcement for tag %q, got %q", tag, ans[0].tag)
+	}
+	if ans[0].tagUpdated {
+		t.Fatalf("did not expect updated tag")
+	}
+	if ans[0].info.Hash != sha {
+		t.Fatalf("tag points to wrong commit %q, expected %q", ans[0].info.Hash, sha)
+	}
+}
+
+// Test: update an annotated tag -> updated announcement
+func TestAnnotatedTag_UpdateAnnouncement(t *testing.T) {
+	repo := newTestRepo(t)
+	tag := "v1.0"
+
+	sha := gitCommit(t, repo, "release")
+	gitTag(t, repo, tag, sha, "annotated "+tag)
+
+	m := &Monitor{
+		config: &MonitorConfig{
+			Name:    "test",
+			RepoDir: repo + "/.git",
+		},
+		state: State{
+			LastSeen: map[string]string{},
+			SeenTags: map[string]string{},
+		},
+		logger: slog.Default(),
+	}
+
+	m.collectAnnouncements()
+
+	sha = gitCommit(t, repo, "new release")
+
+	m.collectAnnouncements()
+
+	gitTag(t, repo, tag, sha, "retag "+tag)
 
 	ans := m.collectAnnouncements()
 	if len(ans) != 1 {
