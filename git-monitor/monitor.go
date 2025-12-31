@@ -317,17 +317,19 @@ func (m *Monitor) collectAnnouncements() []*announcement {
 		}
 		sort.Strings(names)
 		for _, t := range names {
-			// For annotated tags, objectname is the tag object; we
-			// want the commit the tag points to.
-			commitSHA, err := m.derefTagToCommit(t)
-			if err != nil {
-				// fallback to the objectname
-				commitSHA = tags[t]
-			}
+			sha := tags[t]
 			prev, seen := m.state.SeenTags[t]
-			if !seen || prev != commitSHA {
+			if !seen || prev != sha {
 				// New tag, or tag has been updated to point to
 				// difference commit (rare).
+				//
+				// For annotated tags, objectname is the tag object; we
+				// want the commit the tag points to.
+				commitSHA, err := m.derefTagToCommit(t)
+				if err != nil {
+					// fallback to the objectname
+					commitSHA = sha
+				}
 				ci, err := m.getCommitInfo(commitSHA)
 				if err == nil {
 					tagAns = append(tagAns, &announcement{
