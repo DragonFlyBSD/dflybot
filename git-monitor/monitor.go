@@ -128,6 +128,8 @@ func (m *Monitor) loadState() error {
 			m.logger.Error("state file unmarshal failure", "path", path, "error", err)
 			return err
 		}
+		m.logger.Info("state loaded", "file", path,
+			"branches", len(state.LastSeen), "tags", len(state.SeenTags))
 	}
 
 	if state.LastSeen == nil {
@@ -141,7 +143,6 @@ func (m *Monitor) loadState() error {
 	m.state = state
 	m.mutex.Unlock()
 
-	m.logger.Info("state loaded", "file", path)
 	return nil
 }
 
@@ -179,6 +180,7 @@ func (m *Monitor) seedState() error {
 	}
 
 	m.logger.Info("seeding state with current repo tips")
+
 	// branches
 	refs, err := m.listRefs("refs/heads")
 	if err != nil {
@@ -187,6 +189,8 @@ func (m *Monitor) seedState() error {
 	for name, sha := range refs {
 		m.state.LastSeen["branch:"+name] = sha
 	}
+	m.logger.Info("seeded branches", "count", len(m.state.LastSeen))
+
 	// tags
 	tags, err := m.listRefs("refs/tags")
 	if err != nil {
@@ -195,6 +199,8 @@ func (m *Monitor) seedState() error {
 	for t, sha := range tags {
 		m.state.SeenTags[t] = sha
 	}
+	m.logger.Info("seeded tags", "count", len(m.state.SeenTags))
+
 	m.state.UpdatedAt = time.Now()
 	return nil
 }
@@ -257,9 +263,8 @@ func (m *Monitor) collectAnnouncements() []*announcement {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	var ans []*announcement
-
 	// branches
+	var branchAns []*announcement
 	branches, err := m.listRefs("refs/heads")
 	if err == nil {
 		// iterate branches in sorted order for determinism
@@ -292,7 +297,7 @@ func (m *Monitor) collectAnnouncements() []*announcement {
 					continue
 				}
 				isMerge, _ := m.isMergeCommit(sha)
-				ans = append(ans, &announcement{
+				branchAns = append(branchAns, &announcement{
 					branch:  b,
 					info:    ci,
 					isMerge: isMerge,
@@ -303,6 +308,7 @@ func (m *Monitor) collectAnnouncements() []*announcement {
 	}
 
 	// tags
+	var tagAns []*announcement
 	tags, err := m.listRefs("refs/tags")
 	if err == nil {
 		names := make([]string, 0, len(tags))
@@ -311,13 +317,12 @@ func (m *Monitor) collectAnnouncements() []*announcement {
 		}
 		sort.Strings(names)
 		for _, t := range names {
-			sha := tags[t]
 			// For annotated tags, objectname is the tag object; we
 			// want the commit the tag points to.
 			commitSHA, err := m.derefTagToCommit(t)
 			if err != nil {
 				// fallback to the objectname
-				commitSHA = sha
+				commitSHA = tags[t]
 			}
 			prev, seen := m.state.SeenTags[t]
 			if !seen || prev != commitSHA {
@@ -325,7 +330,7 @@ func (m *Monitor) collectAnnouncements() []*announcement {
 				// difference commit (rare).
 				ci, err := m.getCommitInfo(commitSHA)
 				if err == nil {
-					ans = append(ans, &announcement{
+					tagAns = append(tagAns, &announcement{
 						tag:        t,
 						info:       ci,
 						tagUpdated: seen,
@@ -338,8 +343,8 @@ func (m *Monitor) collectAnnouncements() []*announcement {
 		}
 	}
 
-	m.logger.Debug("collected announcements", "count", len(ans))
-	return ans
+	m.logger.Debug("collected announcements", "branches", len(branchAns), "tags", len(tagAns))
+	return append(branchAns, tagAns...)
 }
 
 func (m *Monitor) sendAnnouncements(ctx context.Context, ans []*announcement) {
