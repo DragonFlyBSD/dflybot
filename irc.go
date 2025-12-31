@@ -435,9 +435,9 @@ func (b *IrcBot) Post(msg Message) {
 	case SourceIRC:
 		from = fmt.Sprintf("[IRC %s]💬 ", msg.From)
 	case SourceWebhook:
-		from = fmt.Sprintf("[Webhook %s]💬 ", msg.From)
+		from = fmt.Sprintf("[Webhook %s]📢 ", msg.From)
 	default:
-		from = fmt.Sprintf("[??? %s]💬 ", msg.From)
+		from = fmt.Sprintf("[❓ %s] ", msg.From)
 	}
 	text := from + msg.Text
 	b.conn.Privmsg(msg.Target, text)
