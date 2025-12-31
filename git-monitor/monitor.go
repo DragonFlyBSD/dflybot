@@ -65,6 +65,10 @@ func NewMonitor(cfg *MonitorConfig, base *slog.Logger) *Monitor {
 	return &Monitor{
 		config: cfg,
 		logger: logger,
+		state: State{
+			LastSeen: make(map[string]string),
+			SeenTags: make(map[string]string),
+		},
 	}
 }
 
