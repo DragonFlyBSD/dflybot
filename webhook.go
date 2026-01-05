@@ -24,7 +24,6 @@ type Webhook struct {
 	server   *http.Server
 	token    string
 	bus      *Bus
-	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 }
 
