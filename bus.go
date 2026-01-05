@@ -18,7 +18,7 @@ type BusSource string
 
 const (
 	SourceIRC     BusSource = "irc"
-	SourceWebhook           = "webhook"
+	SourceWebhook BusSource = "webhook"
 )
 
 type Message struct {
