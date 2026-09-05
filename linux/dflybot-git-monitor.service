@@ -1,0 +1,15 @@
+[Unit]
+Description=DragonFly Bot - Git Monitor
+After=network.target network-online.target nss-lookup.target
+Wants=dflybot.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/dflybot
+ExecStart=/opt/dflybot/git-monitor -config git-monitor.toml
+PrivateTmp=true
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=DragonFly Bot
+After=network.target network-online.target nss-lookup.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/dflybot
+ExecStart=/opt/dflybot/dflybot -config dflybot.toml
+PrivateTmp=true
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
