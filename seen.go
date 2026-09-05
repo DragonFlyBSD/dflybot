@@ -557,33 +557,54 @@ func (r *SeenResult) Text() string {
 	return b.String()
 }
 
-// seenTimeText renders an event time as absolute UTC plus relative age, e.g.
-// "2025-09-05 04:20:10 UTC, 2h ago".
+// seenTimeText renders an event time as absolute UTC plus its relative age,
+// e.g. "2025-09-05 04:20:10 UTC, 2h ago".  The age is shown compactly with
+// at most the two most significant units; months and years are approximated
+// as 30 days and 365 days since calendar arithmetic is meaningless for a
+// plain duration.
 func seenTimeText(u, now int64) string {
-	return time.Unix(u, 0).UTC().Format("2006-01-02 15:04:05") + " UTC, " + formatSeenAge(now-u)
-}
-
-// formatSeenAge renders a duration in seconds as a compact relative age.
-func formatSeenAge(d int64) string {
+	const (
+		minute = 60 // seconds
+		hour   = 60 * minute
+		day    = 24 * hour
+		month  = 30 * day
+		year   = 365 * day
+	)
+	d := now - u
 	if d < 0 {
 		d = 0
 	}
+
+	var age string
 	switch {
-	case d < 60:
-		return fmt.Sprintf("%ds ago", d)
-	case d < 3600:
-		return fmt.Sprintf("%dm ago", d/60)
-	case d < 86400:
-		h, m := d/3600, (d%3600)/60
-		if m == 0 {
-			return fmt.Sprintf("%dh ago", h)
+	case d < minute: // seconds
+		age = fmt.Sprintf("%ds ago", d)
+	case d < hour: // minutes
+		age = fmt.Sprintf("%dm ago", d/minute)
+	case d < day: // hours
+		h, m := d/hour, (d%hour)/minute
+		age = fmt.Sprintf("%dh ago", h)
+		if m > 0 {
+			age = fmt.Sprintf("%dh%dm ago", h, m)
 		}
-		return fmt.Sprintf("%dh%dm ago", h, m)
-	default:
-		days, h := d/86400, (d%86400)/3600
-		if h == 0 {
-			return fmt.Sprintf("%dd ago", days)
+	case d < month: // days
+		days, h := d/day, (d%day)/hour
+		age = fmt.Sprintf("%dd ago", days)
+		if h > 0 {
+			age = fmt.Sprintf("%dd%dh ago", days, h)
 		}
-		return fmt.Sprintf("%dd%dh ago", days, h)
+	case d < year: // months
+		months, days := d/month, (d%month)/day
+		age = fmt.Sprintf("%dmo ago", months)
+		if days > 0 {
+			age = fmt.Sprintf("%dmo%dd ago", months, days)
+		}
+	default: // years
+		years, months := d/year, (d%year)/month
+		age = fmt.Sprintf("%dy ago", years)
+		if months > 0 {
+			age = fmt.Sprintf("%dy%dmo ago", years, months)
+		}
 	}
+	return time.Unix(u, 0).UTC().Format("2006-01-02 15:04:05") + " UTC, " + age
 }

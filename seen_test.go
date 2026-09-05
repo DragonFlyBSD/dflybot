@@ -259,31 +259,32 @@ func TestSeenEntryLast(t *testing.T) {
 	}
 }
 
-func TestFormatSeenAge(t *testing.T) {
+func TestSeenTimeText(t *testing.T) {
 	tests := []struct {
-		sec  int64
+		age  int64 // seconds between the event time and now
 		want string
 	}{
 		{0, "0s ago"},
-		{5, "5s ago"},
+		{30, "30s ago"},
 		{125, "2m ago"},
 		{3665, "1h1m ago"},
 		{7200, "2h ago"},
 		{90000, "1d1h ago"},
 		{172800, "2d ago"},
+		{29 * 86400, "29d ago"},
+		{30 * 86400, "1mo ago"},
+		{35 * 86400, "1mo5d ago"},
+		{364 * 86400, "12mo4d ago"},
+		{365 * 86400, "1y ago"},
+		{400 * 86400, "1y1mo ago"},
+		{-10, "0s ago"}, // future timestamp clamped to "now"
 	}
 	for _, tt := range tests {
-		if got := formatSeenAge(tt.sec); got != tt.want {
-			t.Errorf("formatSeenAge(%d) = %q, want %q", tt.sec, got, tt.want)
+		got := seenTimeText(seenTime(0).Unix(), seenTime(tt.age).Unix())
+		want := "2023-11-14 22:13:20 UTC, " + tt.want
+		if got != want {
+			t.Errorf("seenTimeText() for age %ds = %q, want %q", tt.age, got, want)
 		}
-	}
-}
-
-func TestSeenTimeText(t *testing.T) {
-	got := seenTimeText(seenTime(100).Unix(), seenTime(130).Unix())
-	want := "2023-11-14 22:15:00 UTC, 30s ago"
-	if got != want {
-		t.Errorf("seenTimeText() = %q, want %q", got, want)
 	}
 }
 
