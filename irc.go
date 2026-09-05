@@ -51,12 +51,13 @@ type IrcBot struct {
 	config *IrcConfig
 	conn   *irc.Conn
 	bus    *Bus
+	seen   *SeenStore
 	cache  *ttlcache.Cache
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
-func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
+func NewIrcBot(cfg *IrcConfig, bus *Bus, seen *SeenStore) *IrcBot {
 	ic := irc.NewConfig(cfg.Nick)
 	ic.Server = net.JoinHostPort(cfg.Server, strconv.Itoa(int(cfg.Port)))
 	ic.Timeout = 30 * time.Second
@@ -77,6 +78,7 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 		config: cfg,
 		conn:   conn,
 		bus:    bus,
+		seen:   seen,
 		cache:  ttlcache.New(opmeLeeway*2, 0, nil),
 	}
 
@@ -94,6 +96,21 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 	conn.HandleFunc(irc.PING, func(_ *irc.Conn, l *irc.Line) {
 		slog.Debug("IRC PING from server", "line", l.Raw)
 	})
+	conn.HandleFunc(irc.JOIN, func(_ *irc.Conn, l *irc.Line) {
+		slog.Debug("IRC join", "channel", l.Target(), "nick", l.Nick)
+		ibot.seen.Join(l.Target(), l.Nick, time.Now())
+	})
+	conn.HandleFunc(irc.PART, func(_ *irc.Conn, l *irc.Line) {
+		slog.Debug("IRC part", "channel", l.Target(), "nick", l.Nick)
+		ibot.seen.Leave(l.Target(), l.Nick, time.Now())
+	})
+	conn.HandleFunc(irc.KICK, func(_ *irc.Conn, l *irc.Line) {
+		if len(l.Args) < 2 {
+			return
+		}
+		slog.Debug("IRC kick", "channel", l.Target(), "nick", l.Args[1], "by", l.Nick)
+		ibot.seen.Leave(l.Target(), l.Args[1], time.Now())
+	})
 	conn.HandleFunc(irc.PRIVMSG, func(c *irc.Conn, l *irc.Line) {
 		slog.Debug("IRC received message", "target", l.Target(), "sender", l.Nick, "text", l.Text())
 		me := c.Me().Nick
@@ -102,29 +119,38 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus) *IrcBot {
 		if loc := re.FindStringIndex(text); loc != nil {
 			text = text[loc[1]:]
 		}
-		if target := l.Target(); target == l.Nick {
+		target := l.Target()
+		if target == l.Nick {
 			// Private message to me.
 			ibot.tryCommand(text, target, l)
-		} else if !ibot.tryCommand(text, target, l) {
-			ibot.bus.Produce(Message{
-				Source:    SourceIRC,
-				Timestamp: time.Now(),
-				From:      l.Nick,
-				Target:    target,
-				Text:      text,
-			})
+		} else {
+			ibot.seen.Message(target, l.Nick, time.Now())
+			if !ibot.tryCommand(text, target, l) {
+				ibot.bus.Produce(Message{
+					Source:    SourceIRC,
+					Timestamp: time.Now(),
+					From:      l.Nick,
+					Target:    target,
+					Text:      text,
+				})
+			}
 		}
 	})
-	conn.HandleFunc(irc.QUIT, func(_ *irc.Conn, _ *irc.Line) {
+	conn.HandleFunc(irc.QUIT, func(_ *irc.Conn, l *irc.Line) {
 		ibot.tryRecoverNick()
+		ibot.seen.Quit(l.Nick, time.Now())
 	})
 	conn.HandleFunc(irc.NICK, func(c *irc.Conn, l *irc.Line) {
 		if l.Nick != c.Me().Nick {
 			ibot.tryRecoverNick()
 		}
+		ibot.seen.Rename(l.Nick, l.Args[0])
 	})
 	conn.HandleFunc(irc.ACTION, func(c *irc.Conn, l *irc.Line) {
 		slog.Debug("IRC received action", "target", l.Target(), "sender", l.Nick, "text", l.Text())
+		if target := l.Target(); target != l.Nick {
+			ibot.seen.Message(target, l.Nick, time.Now())
+		}
 		ibot.bus.Produce(Message{
 			Source:    SourceIRC,
 			Timestamp: time.Now(),
@@ -158,12 +184,18 @@ func (b *IrcBot) tryCommand(text, target string, l *irc.Line) bool {
 			b.conn.Privmsg(target, "command opme only works in channel")
 			return true
 		}
-		ch := target
-		if !b.hasModeOp(ch) {
-			b.conn.Privmsg(ch, l.Nick+": I don't have the permission yet")
+		if !b.hasModeOp(target) {
+			b.conn.Privmsg(target, l.Nick+": I don't have the permission yet")
 			return true
 		}
-		b.handleOpMe(ch, l.Nick, arg)
+		b.handleOpMe(target, l.Nick, arg)
+		return true
+	case "seen":
+		if !strings.HasPrefix(target, "#") {
+			b.conn.Privmsg(target, "command seen only works in channel")
+			return true
+		}
+		b.handleSeen(target, arg)
 		return true
 	default:
 		b.conn.Privmsg(target, "unknown command: "+cmd)
@@ -272,6 +304,26 @@ func (b *IrcBot) handleOpMe(channel, nick, arg string) {
 
 	b.conn.Mode(channel, "+o", nick)
 	slog.Info("IRC opme granted", "channel", channel, "nick", nick, "username", username)
+}
+
+// handleSeen implements the !seen command: report the presence and last
+// activity times of a nick in the given channel, from the live state tracker
+// (presence) and the per-channel seen database (history).
+func (b *IrcBot) handleSeen(channel, query string) {
+	query = strings.TrimSpace(strings.TrimPrefix(query, "@"))
+	if query == "" {
+		b.conn.Privmsg(channel, "usage: !seen <nick>")
+		return
+	}
+
+	var present []string
+	if ch := b.conn.StateTracker().GetChannel(channel); ch != nil {
+		for nick := range ch.Nicks {
+			present = append(present, nick)
+		}
+	}
+	res := b.seen.Lookup(channel, query, present)
+	b.conn.Privmsg(channel, res.Text())
 }
 
 func (b *IrcBot) Start() {

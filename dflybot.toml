@@ -1,6 +1,14 @@
 # Logger level: debug, info, warn, error
 log_level = "info"
 
+# Data directory to store per-channel state (e.g., seen databases, logs)
+# NOTE: Must end with a slash (/).
+data_dir = "./data/"
+
+# Interval (seconds) between periodic flushes of the per-channel state to disk
+# (default: 10)
+flush_interval = 10
+
 # Webhook service to accept external notifications.
 [webhook]
 # Listen address, e.g., "127.0.0.1:2018"

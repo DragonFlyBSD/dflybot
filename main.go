@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/go-playground/validator/v10"
@@ -28,6 +29,12 @@ var validate = validator.New(validator.WithRequiredStructEnabled())
 type Config struct {
 	// Logger level: debug, info, warn, error
 	LogLevel string `toml:"log_level" validate:"required,oneof=debug info warn error"`
+	// Data directory to store per-channel state (e.g., seen databases, logs)
+	// NOTE: Must end with a slash (/) as required by the 'dirpath' validator.
+	DataDir string `toml:"data_dir" validate:"required,dirpath"`
+	// Interval (seconds) between periodic flushes of the per-channel state
+	// to disk; defaults to 10 seconds when not set.
+	FlushInterval int `toml:"flush_interval"`
 	// Webhook service to accept external notifications.
 	Webhook struct {
 		// Listen address, e.g., "127.0.0.1:2018"
@@ -108,6 +115,12 @@ func main() {
 		slog.Warn("unknown log level", "level", config.LogLevel)
 	}
 
+	seen, err := NewSeenStore(config.DataDir, time.Duration(config.FlushInterval)*time.Second)
+	if err != nil {
+		slog.Error("Seen store setup failed", "dir", config.DataDir, "error", err)
+		os.Exit(1)
+	}
+
 	bus := NewBus(busBufferSize)
 
 	webhook, err := NewWebhook(config.Webhook.Listen, config.Webhook.Token, bus)
@@ -141,7 +154,7 @@ func main() {
 			OpMe map[string]string
 		}{ch.Name, ch.OpMe})
 	}
-	ibot := NewIrcBot(icfg, bus)
+	ibot := NewIrcBot(icfg, bus, seen)
 	go ibot.Start()
 
 	go func() {
@@ -155,6 +168,7 @@ func main() {
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
 	ibot.Stop()
+	seen.Stop()
 	tgbot.Stop()
 	webhook.Stop()
 	bus.Close()
