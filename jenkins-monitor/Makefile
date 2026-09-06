@@ -1,10 +1,7 @@
-NAME=	dflybot
+NAME=	jenkins-monitor
 
 .PHONY: all
-all: dflybot git-monitor jenkins-monitor
-
-.PHONY: dflybot
-dflybot:
+all:
 	go mod tidy
 	go vet ./...
 	env CGO_ENABLED=0 \
@@ -13,11 +10,3 @@ dflybot:
 		go build -o $(NAME).linux -trimpath
 	env CGO_ENABLED=0 GOOS=dragonfly GOARCH=amd64 \
 		go build -o $(NAME).dragonfly -trimpath
-
-.PHONY: git-monitor
-git-monitor:
-	make -C git-monitor
-
-.PHONY: jenkins-monitor
-jenkins-monitor:
-	make -C jenkins-monitor
