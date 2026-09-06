@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 //
-// Copyright (c) 2025 Aaron LI
+// Copyright (c) 2025-2026 Aaron LI
 //
-// IRC bot to fetch messages.
+// IRC bot that fetches messages, handles commands, routes to message bus,
+// maintains seen database, logs messages.
 //
 
 package main
@@ -52,12 +53,19 @@ type IrcBot struct {
 	conn   *irc.Conn
 	bus    *Bus
 	seen   *SeenStore
+	log    *LogStore
 	cache  *ttlcache.Cache
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// Current membership (lowercased nicks) of every joined channel, used
+	// to attribute the channel-less NICK/QUIT events to the right channel
+	// logs.  Only touched from the IRC foreground handlers, which goirc
+	// runs sequentially per event.
+	members map[string]map[string]struct{}
 }
 
-func NewIrcBot(cfg *IrcConfig, bus *Bus, seen *SeenStore) *IrcBot {
+func NewIrcBot(cfg *IrcConfig, bus *Bus, seen *SeenStore, log *LogStore) *IrcBot {
 	ic := irc.NewConfig(cfg.Nick)
 	ic.Server = net.JoinHostPort(cfg.Server, strconv.Itoa(int(cfg.Port)))
 	ic.Timeout = 30 * time.Second
@@ -75,11 +83,13 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus, seen *SeenStore) *IrcBot {
 
 	conn := irc.Client(ic)
 	ibot := &IrcBot{
-		config: cfg,
-		conn:   conn,
-		bus:    bus,
-		seen:   seen,
-		cache:  ttlcache.New(opmeLeeway*2, 0, nil),
+		config:  cfg,
+		conn:    conn,
+		bus:     bus,
+		seen:    seen,
+		log:     log,
+		cache:   ttlcache.New(opmeLeeway*2, 0, nil),
+		members: make(map[string]map[string]struct{}),
 	}
 
 	conn.EnableStateTracking()
@@ -92,24 +102,59 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus, seen *SeenStore) *IrcBot {
 	})
 	conn.HandleFunc(irc.DISCONNECTED, func(c *irc.Conn, _ *irc.Line) {
 		slog.Info("IRC disconnected", "server", c.Config().Server)
+		// Membership is stale after a disconnect; NAMES re-seeds on rejoin.
+		ibot.members = make(map[string]map[string]struct{})
 	})
 	conn.HandleFunc(irc.PING, func(_ *irc.Conn, l *irc.Line) {
 		slog.Debug("IRC PING from server", "line", l.Raw)
 	})
-	conn.HandleFunc(irc.JOIN, func(_ *irc.Conn, l *irc.Line) {
+	conn.HandleFunc(irc.JOIN, func(c *irc.Conn, l *irc.Line) {
 		slog.Debug("IRC join", "channel", l.Target(), "nick", l.Nick)
-		ibot.seen.Join(l.Target(), l.Nick, time.Now())
+		now := time.Now()
+		ch := l.Target()
+		ibot.seen.Join(ch, l.Nick, now)
+		if l.Nick == c.Me().Nick {
+			// We (re)joined: reset the channel membership and let the
+			// NAMES reply that follows re-seed it.
+			ibot.members[ch] = make(map[string]struct{})
+		}
+		ibot.addMember(ch, l.Nick)
+		ibot.log.Record(LogRecord{Timestamp: now, Type: LogTypeJoin, Channel: ch,
+			Nick: l.Nick, User: l.Ident, Host: l.Host})
 	})
 	conn.HandleFunc(irc.PART, func(_ *irc.Conn, l *irc.Line) {
 		slog.Debug("IRC part", "channel", l.Target(), "nick", l.Nick)
-		ibot.seen.Leave(l.Target(), l.Nick, time.Now())
+		now := time.Now()
+		ch := l.Target()
+		ibot.seen.Leave(ch, l.Nick, now)
+		ibot.delMember(ch, l.Nick)
+		rec := LogRecord{Timestamp: now, Type: LogTypePart, Channel: ch,
+			Nick: l.Nick, User: l.Ident, Host: l.Host}
+		if len(l.Args) > 1 { // the optional part message
+			rec.Text = l.Args[1]
+		}
+		ibot.log.Record(rec)
 	})
-	conn.HandleFunc(irc.KICK, func(_ *irc.Conn, l *irc.Line) {
+	conn.HandleFunc(irc.KICK, func(c *irc.Conn, l *irc.Line) {
 		if len(l.Args) < 2 {
 			return
 		}
 		slog.Debug("IRC kick", "channel", l.Target(), "nick", l.Args[1], "by", l.Nick)
-		ibot.seen.Leave(l.Target(), l.Args[1], time.Now())
+		now := time.Now()
+		ch := l.Target()
+		victim := l.Args[1]
+		ibot.seen.Leave(ch, victim, now)
+		if strings.EqualFold(victim, c.Me().Nick) {
+			delete(ibot.members, ch) // we are no longer in this channel
+		} else {
+			ibot.delMember(ch, victim)
+		}
+		rec := LogRecord{Timestamp: now, Type: LogTypeKick, Channel: ch,
+			Nick: l.Nick, User: l.Ident, Host: l.Host, Target: victim}
+		if len(l.Args) > 2 { // the optional kick reason
+			rec.Text = l.Args[2]
+		}
+		ibot.log.Record(rec)
 	})
 	conn.HandleFunc(irc.PRIVMSG, func(c *irc.Conn, l *irc.Line) {
 		slog.Debug("IRC received message", "target", l.Target(), "sender", l.Nick, "text", l.Text())
@@ -125,6 +170,8 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus, seen *SeenStore) *IrcBot {
 			ibot.tryCommand(text, target, l)
 		} else {
 			ibot.seen.Message(target, l.Nick, time.Now())
+			ibot.log.Record(LogRecord{Timestamp: time.Now(), Type: LogTypeMessage,
+				Channel: target, Nick: l.Nick, User: l.Ident, Host: l.Host, Text: l.Text()})
 			if !ibot.tryCommand(text, target, l) {
 				ibot.bus.Produce(Message{
 					Source:    SourceIRC,
@@ -138,17 +185,45 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus, seen *SeenStore) *IrcBot {
 	})
 	conn.HandleFunc(irc.QUIT, func(_ *irc.Conn, l *irc.Line) {
 		ibot.tryRecoverNick()
-		ibot.seen.Quit(l.Nick, time.Now())
+		now := time.Now()
+		// A QUIT carries no channel; log it to every channel of which the
+		// nick was a member (our membership mirror).
+		for ch := range ibot.members {
+			if !ibot.hasMember(ch, l.Nick) {
+				continue
+			}
+			rec := LogRecord{Timestamp: now, Type: LogTypeQuit, Channel: ch,
+				Nick: l.Nick, User: l.Ident, Host: l.Host}
+			if len(l.Args) > 0 { // the optional quit message
+				rec.Text = l.Args[0]
+			}
+			ibot.log.Record(rec)
+		}
+		ibot.delMemberAll(l.Nick)
+		ibot.seen.Quit(l.Nick, now)
 	})
 	conn.HandleFunc(irc.NICK, func(c *irc.Conn, l *irc.Line) {
 		if l.Nick != c.Me().Nick {
 			ibot.tryRecoverNick()
 		}
-		ibot.seen.Rename(l.Nick, l.Args[0])
+		now := time.Now()
+		old, neu := l.Nick, l.Args[0]
+		// A NICK carries no channel; log it to every channel of which the
+		// nick was a member (our membership mirror).
+		for ch := range ibot.members {
+			if ibot.hasMember(ch, old) {
+				ibot.log.Record(LogRecord{Timestamp: now, Type: LogTypeNick,
+					Channel: ch, User: l.Ident, Host: l.Host, From: old, To: neu})
+			}
+		}
+		ibot.renameMember(old, neu)
+		ibot.seen.Rename(old, neu)
 	})
 	conn.HandleFunc(irc.ACTION, func(c *irc.Conn, l *irc.Line) {
 		slog.Debug("IRC received action", "target", l.Target(), "sender", l.Nick, "text", l.Text())
 		if target := l.Target(); target != l.Nick {
+			ibot.log.Record(LogRecord{Timestamp: time.Now(), Type: LogTypeAction,
+				Channel: target, Nick: l.Nick, User: l.Ident, Host: l.Host, Text: l.Text()})
 			ibot.seen.Message(target, l.Nick, time.Now())
 		}
 		ibot.bus.Produce(Message{
@@ -160,8 +235,112 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus, seen *SeenStore) *IrcBot {
 			Text:      l.Text(),
 		})
 	})
+	conn.HandleFunc(irc.NOTICE, func(_ *irc.Conn, l *irc.Line) {
+		slog.Debug("IRC notice", "target", l.Target(), "sender", l.Nick, "text", l.Text())
+		// Only channel NOTICEs are logged (private/server ones ignored).
+		if target := l.Target(); strings.HasPrefix(target, "#") {
+			ibot.log.Record(LogRecord{Timestamp: time.Now(), Type: LogTypeNotice,
+				Channel: target, Nick: l.Nick, User: l.Ident, Host: l.Host, Text: l.Text()})
+		}
+	})
+	conn.HandleFunc(irc.MODE, func(_ *irc.Conn, l *irc.Line) {
+		slog.Debug("IRC mode", "target", l.Target(), "sender", l.Nick, "text", l.Text())
+		// l.Args: [channel, modes, mode args...]; log only channel modes.
+		if len(l.Args) < 2 || !strings.HasPrefix(l.Target(), "#") {
+			return
+		}
+		ibot.log.Record(LogRecord{Timestamp: time.Now(), Type: LogTypeMode,
+			Channel: l.Target(), Nick: l.Nick, User: l.Ident, Host: l.Host,
+			Modes: l.Args[1], Targets: l.Args[2:]})
+	})
+	conn.HandleFunc(irc.TOPIC, func(_ *irc.Conn, l *irc.Line) {
+		slog.Debug("IRC topic", "target", l.Target(), "sender", l.Nick, "text", l.Text())
+		ibot.log.Record(LogRecord{Timestamp: time.Now(), Type: LogTypeTopic,
+			Channel: l.Target(), Nick: l.Nick, User: l.Ident, Host: l.Host, Text: l.Text()})
+	})
+	conn.HandleFunc("353", func(_ *irc.Conn, l *irc.Line) {
+		// The server auto sends the NAMES replies on a success JOIN.
+		// NAMES reply: "<me> <symbol> <channel> :<names>", which re-seeds
+		// the membership of a channel we just joined.
+		slog.Debug("IRC 353/names", "target", l.Target(), "sender", l.Nick, "text", l.Text())
+		if len(l.Args) < 4 {
+			return
+		}
+		ch := l.Args[2]
+		if ibot.members[ch] == nil {
+			return
+		}
+		for _, nick := range strings.Fields(l.Args[len(l.Args)-1]) {
+			if nick = strings.TrimLeft(nick, "~&@%+"); nick != "" {
+				ibot.addMember(ch, nick)
+			}
+		}
+	})
 
 	return ibot
+}
+
+// say sends a message to target (a channel or a nick), and logs the bot's
+// own channel messages (self: true) into the channel log.
+func (b *IrcBot) say(target, text string) {
+	b.conn.Privmsg(target, text)
+	if strings.HasPrefix(target, "#") {
+		// Only log messages to a channel.
+		b.log.Record(LogRecord{Timestamp: time.Now(), Type: LogTypeMessage,
+			Channel: target, Nick: b.conn.Me().Nick, Text: text, Self: true})
+	}
+}
+
+// The following track the current membership of each joined channel.
+
+func (b *IrcBot) addMember(ch, nick string) {
+	if nick == "" {
+		return
+	}
+	set := b.members[ch]
+	if set == nil {
+		set = make(map[string]struct{})
+		b.members[ch] = set
+	}
+	set[strings.ToLower(nick)] = struct{}{}
+}
+
+func (b *IrcBot) delMember(ch, nick string) {
+	if set := b.members[ch]; set != nil {
+		delete(set, strings.ToLower(nick))
+	}
+}
+
+func (b *IrcBot) hasMember(ch, nick string) bool {
+	set := b.members[ch]
+	if set == nil {
+		return false
+	}
+	_, ok := set[strings.ToLower(nick)]
+	return ok
+}
+
+// renameMember moves the membership of a nick across all channels (NICK
+// events carry no channel).
+func (b *IrcBot) renameMember(old, neu string) {
+	lo, ln := strings.ToLower(old), strings.ToLower(neu)
+	if lo == ln {
+		return
+	}
+	for _, set := range b.members {
+		if _, ok := set[lo]; ok {
+			delete(set, lo)
+			set[ln] = struct{}{}
+		}
+	}
+}
+
+// delMemberAll removes a nick (QUIT) from every channel.
+func (b *IrcBot) delMemberAll(nick string) {
+	ln := strings.ToLower(nick)
+	for _, set := range b.members {
+		delete(set, ln)
+	}
 }
 
 func (b *IrcBot) tryCommand(text, target string, l *irc.Line) bool {
@@ -177,28 +356,28 @@ func (b *IrcBot) tryCommand(text, target string, l *irc.Line) bool {
 	// TODO: more commands
 	switch cmd {
 	case "ping":
-		b.conn.Privmsg(target, "pong")
+		b.say(target, "pong")
 		return true
 	case "opme":
 		if !strings.HasPrefix(target, "#") {
-			b.conn.Privmsg(target, "command opme only works in channel")
+			b.say(target, "command opme only works in channel")
 			return true
 		}
 		if !b.hasModeOp(target) {
-			b.conn.Privmsg(target, l.Nick+": I don't have the permission yet")
+			b.say(target, l.Nick+": I don't have the permission yet")
 			return true
 		}
 		b.handleOpMe(target, l.Nick, arg)
 		return true
 	case "seen":
 		if !strings.HasPrefix(target, "#") {
-			b.conn.Privmsg(target, "command seen only works in channel")
+			b.say(target, "command seen only works in channel")
 			return true
 		}
 		b.handleSeen(target, arg)
 		return true
 	default:
-		b.conn.Privmsg(target, "unknown command: "+cmd)
+		b.say(target, "unknown command: "+cmd)
 		slog.Warn("IRC unknown command", "cmd", cmd, "arg", arg)
 		return false
 	}
@@ -245,14 +424,14 @@ func (b *IrcBot) handleOpMe(channel, nick, arg string) {
 		}
 	}
 	if creds == nil {
-		b.conn.Privmsg(nick, "unsupported opme channel: "+channel)
+		b.say(nick, "unsupported opme channel: "+channel)
 		return
 	}
 
 	// arg: <username>:<timestamp>:<hmac>
 	args := strings.Split(arg, ":")
 	if len(args) != 3 {
-		b.conn.Privmsg(nick, "invalid opme argument: "+arg)
+		b.say(nick, "invalid opme argument: "+arg)
 		return
 	}
 	username, timestamp, mac := args[0], args[1], strings.ToLower(args[2])
@@ -260,13 +439,13 @@ func (b *IrcBot) handleOpMe(channel, nick, arg string) {
 
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
-		b.conn.Privmsg(nick, "invalid opme argument: "+arg)
+		b.say(nick, "invalid opme argument: "+arg)
 		slog.Debug("IRC opme timestamp invalid", "timestamp", timestamp)
 		return
 	}
 	d := time.Since(time.Unix(ts, 0))
 	if d.Abs() > opmeLeeway {
-		b.conn.Privmsg(nick, "invalid opme argument: "+arg)
+		b.say(nick, "invalid opme argument: "+arg)
 		slog.Debug("IRC opme timestamp out-of-range", "timestamp", timestamp)
 		return
 	}
@@ -281,7 +460,7 @@ func (b *IrcBot) handleOpMe(channel, nick, arg string) {
 		}
 	}
 	if macKey == "" {
-		b.conn.Privmsg(nick, "opme denied")
+		b.say(nick, "opme denied")
 		slog.Debug("IRC opme username invalid", "username", username)
 		return
 	}
@@ -290,13 +469,13 @@ func (b *IrcBot) handleOpMe(channel, nick, arg string) {
 	h.Write([]byte(authID))
 	expected := hex.EncodeToString(h.Sum(nil))
 	if expected != mac {
-		b.conn.Privmsg(nick, "opme denied")
+		b.say(nick, "opme denied")
 		slog.Debug("IRC opme mac invalid", "mac", mac, "expected", expected)
 		return
 	}
 
 	if _, exists := b.cache.Get(authID); exists {
-		b.conn.Privmsg(nick, "opme denied")
+		b.say(nick, "opme denied")
 		slog.Debug("IRC opme auth replayed", "authID", authID)
 		return
 	}
@@ -312,7 +491,7 @@ func (b *IrcBot) handleOpMe(channel, nick, arg string) {
 func (b *IrcBot) handleSeen(channel, query string) {
 	query = strings.TrimSpace(strings.TrimPrefix(query, "@"))
 	if query == "" {
-		b.conn.Privmsg(channel, "usage: !seen <nick>")
+		b.say(channel, "usage: !seen <nick>")
 		return
 	}
 
@@ -323,7 +502,7 @@ func (b *IrcBot) handleSeen(channel, query string) {
 		}
 	}
 	res := b.seen.Lookup(channel, query, present)
-	b.conn.Privmsg(channel, res.Text())
+	b.say(channel, res.Text())
 }
 
 func (b *IrcBot) Start() {
@@ -492,6 +671,6 @@ func (b *IrcBot) Post(msg Message) {
 		from = fmt.Sprintf("[❓ %s] ", msg.From)
 	}
 	text := from + msg.Text
-	b.conn.Privmsg(msg.Target, text)
+	b.say(msg.Target, text)
 	slog.Debug("IRC bot posted message", "target", msg.Target, "text", text)
 }

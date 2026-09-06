@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// Copyright (c) 2025 Aaron LI
+// Copyright (c) 2025-2026 Aaron LI
 //
 // Simple bot for the DragonFly project.
 //
@@ -115,9 +115,17 @@ func main() {
 		slog.Warn("unknown log level", "level", config.LogLevel)
 	}
 
-	seen, err := NewSeenStore(config.DataDir, time.Duration(config.FlushInterval)*time.Second)
+	flushInterval := time.Duration(config.FlushInterval) * time.Second
+
+	seen, err := NewSeenStore(config.DataDir, flushInterval)
 	if err != nil {
 		slog.Error("Seen store setup failed", "dir", config.DataDir, "error", err)
+		os.Exit(1)
+	}
+
+	chlog, err := NewLogStore(config.DataDir, flushInterval)
+	if err != nil {
+		slog.Error("Channel log store setup failed", "dir", config.DataDir, "error", err)
 		os.Exit(1)
 	}
 
@@ -154,7 +162,7 @@ func main() {
 			OpMe map[string]string
 		}{ch.Name, ch.OpMe})
 	}
-	ibot := NewIrcBot(icfg, bus, seen)
+	ibot := NewIrcBot(icfg, bus, seen, chlog)
 	go ibot.Start()
 
 	go func() {
@@ -168,6 +176,7 @@ func main() {
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
 	ibot.Stop()
+	chlog.Stop()
 	seen.Stop()
 	tgbot.Stop()
 	webhook.Stop()
