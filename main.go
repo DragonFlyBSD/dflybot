@@ -37,10 +37,12 @@ type Config struct {
 	FlushInterval int `toml:"flush_interval"`
 	// Webhook service to accept external notifications.
 	Webhook struct {
+		// Whether enabled?
+		Enabled bool `toml:"enabled"`
 		// Listen address, e.g., "127.0.0.1:2018"
-		Listen string `toml:"listen" validate:"tcp_addr"`
+		Listen string `toml:"listen" validate:"required_if=Enabled true,omitempty,tcp_addr"`
 		// Bearer token to authenticate.
-		Token string `toml:"token" validate:"required,min=20"`
+		Token string `toml:"token" validate:"required_if=Enabled true,omitempty,min=20"`
 	} `toml:"webhook" validate:"required"`
 	// The IRC to interact with.
 	IRC struct {
@@ -63,8 +65,10 @@ type Config struct {
 	} `toml:"irc" validate:"required"`
 	// Telegram settings.
 	Telegram struct {
+		// Whether enabled?
+		Enabled bool `toml:"enabled"`
 		// The bot token.
-		Token string `toml:"token" validate:"required"`
+		Token string `toml:"token" validate:"required_if=Enabled true"`
 		// The Chat IDs where to post messages.
 		Chats []int64 `toml:"chats"`
 	} `toml:"telegram" validate:"required"`
@@ -115,6 +119,7 @@ func main() {
 		slog.Warn("unknown log level", "level", config.LogLevel)
 	}
 
+	var stoppers []interface{ Stop() }
 	flushInterval := time.Duration(config.FlushInterval) * time.Second
 
 	seen, err := NewSeenStore(config.DataDir, flushInterval)
@@ -122,33 +127,41 @@ func main() {
 		slog.Error("Seen store setup failed", "dir", config.DataDir, "error", err)
 		os.Exit(1)
 	}
+	stoppers = append(stoppers, seen)
 
 	chlog, err := NewLogStore(config.DataDir, flushInterval)
 	if err != nil {
 		slog.Error("Channel log store setup failed", "dir", config.DataDir, "error", err)
 		os.Exit(1)
 	}
+	stoppers = append(stoppers, chlog)
 
 	bus := NewBus(busBufferSize)
 
-	webhook, err := NewWebhook(config.Webhook.Listen, config.Webhook.Token, bus)
-	if err != nil {
-		os.Exit(1)
-	}
-	go webhook.Start()
-
-	tgbot, err := NewTgBot(config.Telegram.Token, config.Telegram.Chats)
-	if err != nil {
-		os.Exit(1)
-	}
-	go tgbot.Start()
-
-	go func() {
-		sub := bus.Subscribe("telegram", busBufferSize)
-		for msg := range sub.C {
-			tgbot.Post(msg)
+	if config.Webhook.Enabled {
+		webhook, err := NewWebhook(config.Webhook.Listen, config.Webhook.Token, bus)
+		if err != nil {
+			os.Exit(1)
 		}
-	}()
+		go webhook.Start()
+		stoppers = append(stoppers, webhook)
+	}
+
+	if config.Telegram.Enabled {
+		tgbot, err := NewTgBot(config.Telegram.Token, config.Telegram.Chats)
+		if err != nil {
+			os.Exit(1)
+		}
+		go tgbot.Start()
+		stoppers = append(stoppers, tgbot)
+
+		go func() {
+			sub := bus.Subscribe("telegram", busBufferSize)
+			for msg := range sub.C {
+				tgbot.Post(msg)
+			}
+		}()
+	}
 
 	icfg := &IrcConfig{
 		Nick:   config.IRC.Nick,
@@ -164,6 +177,7 @@ func main() {
 	}
 	ibot := NewIrcBot(icfg, bus, seen, chlog)
 	go ibot.Start()
+	stoppers = append(stoppers, ibot)
 
 	go func() {
 		sub := bus.Subscribe("irc", busBufferSize)
@@ -175,10 +189,9 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
-	ibot.Stop()
-	chlog.Stop()
-	seen.Stop()
-	tgbot.Stop()
-	webhook.Stop()
+
+	for i := len(stoppers) - 1; i >= 0; i-- {
+		stoppers[i].Stop()
+	}
 	bus.Close()
 }

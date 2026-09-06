@@ -11,6 +11,7 @@ flush_interval = 10
 
 # Webhook service to accept external notifications.
 [webhook]
+enabled = true
 # Listen address, e.g., "127.0.0.1:2018"
 listen = "127.0.0.1:2018"
 # Bearer token to authenticate with (minimal length is 20 bytes).
@@ -41,6 +42,7 @@ name = "#dragonflybsd"
 
 # Telegram settings.
 [telegram]
+enabled = true
 # The bot token.
 token = "???"
 # The Chat IDs where to post messages.
