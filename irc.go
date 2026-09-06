@@ -188,10 +188,7 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus, seen *SeenStore, log *LogStore) *IrcBot
 		now := time.Now()
 		// A QUIT carries no channel; log it to every channel of which the
 		// nick was a member (our membership mirror).
-		for ch := range ibot.members {
-			if !ibot.hasMember(ch, l.Nick) {
-				continue
-			}
+		for _, ch := range ibot.memberChannels(l.Nick) {
 			rec := LogRecord{Timestamp: now, Type: LogTypeQuit, Channel: ch,
 				Nick: l.Nick, User: l.Ident, Host: l.Host}
 			if len(l.Args) > 0 { // the optional quit message
@@ -210,11 +207,9 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus, seen *SeenStore, log *LogStore) *IrcBot
 		old, neu := l.Nick, l.Args[0]
 		// A NICK carries no channel; log it to every channel of which the
 		// nick was a member (our membership mirror).
-		for ch := range ibot.members {
-			if ibot.hasMember(ch, old) {
-				ibot.log.Record(LogRecord{Timestamp: now, Type: LogTypeNick,
-					Channel: ch, User: l.Ident, Host: l.Host, From: old, To: neu})
-			}
+		for _, ch := range ibot.memberChannels(old) {
+			ibot.log.Record(LogRecord{Timestamp: now, Type: LogTypeNick,
+				Channel: ch, User: l.Ident, Host: l.Host, From: old, To: neu})
 		}
 		ibot.renameMember(old, neu)
 		ibot.seen.Rename(old, neu)
@@ -311,13 +306,20 @@ func (b *IrcBot) delMember(ch, nick string) {
 	}
 }
 
-func (b *IrcBot) hasMember(ch, nick string) bool {
-	set := b.members[ch]
-	if set == nil {
-		return false
+// memberChannels returns the channels in which the nick is currently a
+// member (the membership mirror; case-insensitive).
+func (b *IrcBot) memberChannels(nick string) []string {
+	if nick == "" {
+		return nil
 	}
-	_, ok := set[strings.ToLower(nick)]
-	return ok
+	lnick := strings.ToLower(nick)
+	var chs []string
+	for ch, set := range b.members {
+		if _, ok := set[lnick]; ok {
+			chs = append(chs, ch)
+		}
+	}
+	return chs
 }
 
 // renameMember moves the membership of a nick across all channels (NICK
