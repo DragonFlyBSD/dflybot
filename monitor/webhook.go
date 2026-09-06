@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 //
-// Copyright (c) 2025 Aaron LI
+// Copyright (c) 2025-2026 Aaron LI
 //
-// Webhook integration.
+// Webhook integration: post announcement messages to dflybot's webhook API.
 //
 
-package main
+package monitor
 
 import (
 	"bytes"
@@ -19,6 +19,7 @@ import (
 	"time"
 )
 
+// ConfigWebhook is the "webhook" section of the monitor config files.
 type ConfigWebhook struct {
 	// Webhook URL
 	URL string `toml:"url" validate:"url"`
@@ -32,6 +33,16 @@ type ConfigWebhook struct {
 	Target string `toml:"target" validate:"required"`
 }
 
+// Poster is the interface used by monitors to deliver announcement messages.
+type Poster interface {
+	// GetMaxLength returns the maximum message length in bytes.
+	GetMaxLength() int
+	// Post sends one message; implementations should retry transient
+	// failures.
+	Post(ctx context.Context, text string) error
+}
+
+// Webhook is the dflybot webhook implementation of the Poster interface.
 type Webhook struct {
 	config      *ConfigWebhook
 	client      *http.Client

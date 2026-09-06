@@ -26,16 +26,15 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/liweitianux/dflybot/monitor"
 )
 
 // Health states of a job.
@@ -91,16 +90,10 @@ type historyLine struct {
 	Reason    string    `json:"reason,omitempty"`
 }
 
-// Poster abstracts the message delivery (see webhook.go).
-type Poster interface {
-	GetMaxLength() int
-	Post(ctx context.Context, text string) error
-}
-
 type Monitor struct {
 	cfg     *ConfigJenkins
 	jenkins *jenkinsClient
-	poster  Poster
+	poster  monitor.Poster
 
 	statePath   string
 	historyPath string
@@ -113,7 +106,7 @@ type Monitor struct {
 	firstPoll bool
 }
 
-func NewMonitor(cfg *ConfigJenkins, jenkins *jenkinsClient, poster Poster,
+func NewMonitor(cfg *ConfigJenkins, jenkins *jenkinsClient, poster monitor.Poster,
 	statePath, historyPath string, base *slog.Logger) *Monitor {
 	if base == nil {
 		base = slog.Default()
@@ -146,17 +139,8 @@ func (m *Monitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 		"url", m.cfg.URL, "jobs", len(m.cfg.Jobs),
 		"interval", m.cfg.Interval)
 
-	ticker := time.NewTicker(time.Duration(m.cfg.Interval) * time.Second)
-	defer ticker.Stop()
-	for {
-		m.poll()
-		select {
-		case <-ctx.Done():
-			m.logger.Debug("monitor exiting")
-			return
-		case <-ticker.C:
-		}
-	}
+	monitor.Loop(ctx, time.Duration(m.cfg.Interval)*time.Second, m.poll)
+	m.logger.Debug("monitor exiting")
 }
 
 // poll checks all jobs and nodes once and announces any state changes.
@@ -404,18 +388,14 @@ func (m *Monitor) nodeText(name string, offline bool, reason string) string {
 // Persistence: state (JSON, atomic) and history (JSONL).
 
 func (m *Monitor) loadState() {
-	if _, err := os.Stat(m.statePath); errors.Is(err, os.ErrNotExist) {
-		m.logger.Debug("state file not exist", "path", m.statePath)
-		return
-	}
-	b, err := os.ReadFile(m.statePath)
+	var st monitorState
+	exists, err := monitor.ReadJSON(m.statePath, &st)
 	if err != nil {
 		m.logger.Error("state file read failure", "path", m.statePath, "error", err)
 		return
 	}
-	var st monitorState
-	if err := json.Unmarshal(b, &st); err != nil {
-		m.logger.Error("state file unmarshal failure", "path", m.statePath, "error", err)
+	if !exists {
+		m.logger.Debug("state file not exist", "path", m.statePath)
 		return
 	}
 	if st.Version != stateVersion {
@@ -436,18 +416,8 @@ func (m *Monitor) loadState() {
 
 func (m *Monitor) saveState() {
 	m.state.UpdatedAt = time.Now().Unix()
-	b, err := json.MarshalIndent(&m.state, "", "  ")
-	if err != nil {
-		m.logger.Error("state marshal failure", "error", err)
-		return
-	}
-	tmp := m.statePath + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		m.logger.Error("state file write failure", "path", tmp, "error", err)
-		return
-	}
-	if err := os.Rename(tmp, m.statePath); err != nil {
-		m.logger.Error("state file rename failure", "path", m.statePath, "error", err)
+	if err := monitor.SaveJSON(m.statePath, &m.state); err != nil {
+		m.logger.Error("state file save failure", "path", m.statePath, "error", err)
 		return
 	}
 	m.logger.Debug("state saved", "path", m.statePath)
@@ -461,20 +431,9 @@ func (m *Monitor) jobHistory(name string, st *jobState) historyLine {
 // logHistory appends one JSONL line to the history file.
 func (m *Monitor) logHistory(t time.Time, h historyLine) {
 	h.Timestamp = t.UTC()
-	b, err := json.Marshal(h)
-	if err != nil {
-		m.logger.Error("history marshal failure", "error", err)
-		return
+	if err := monitor.AppendJSONL(m.historyPath, h); err != nil {
+		m.logger.Error("history append failure", "path", m.historyPath, "error", err)
 	}
-	f, err := os.OpenFile(m.historyPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		m.logger.Error("history file open failure", "path", m.historyPath, "error", err)
-		return
-	}
-	defer f.Close()
-	w := bufio.NewWriter(f)
-	w.Write(append(b, '\n'))
-	w.Flush()
 }
 
 func (m *Monitor) logNodeHistory(t time.Time, name string, offline bool, reason string) {

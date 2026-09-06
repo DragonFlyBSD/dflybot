@@ -9,18 +9,17 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"log/slog"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/BurntSushi/toml"
 	"github.com/go-playground/validator/v10"
+
+	"github.com/liweitianux/dflybot/monitor"
 )
 
 // Only need to use a single instance of Validate, which caches struct info.
@@ -35,7 +34,7 @@ type Config struct {
 	// The Jenkins to monitor.
 	Jenkins ConfigJenkins `toml:"jenkins" validate:"required"`
 	// Webhook settings
-	Webhook ConfigWebhook `toml:"webhook" validate:"required"`
+	Webhook monitor.ConfigWebhook `toml:"webhook" validate:"required"`
 }
 
 type ConfigJenkins struct {
@@ -102,17 +101,8 @@ func main() {
 	if *isDebug {
 		config.LogLevel = "debug"
 	}
-	switch config.LogLevel {
-	case "", "info":
-		logLevel.Set(slog.LevelInfo)
-	case "debug":
-		logLevel.Set(slog.LevelDebug)
-	case "warn":
-		logLevel.Set(slog.LevelWarn)
-	case "error":
-		logLevel.Set(slog.LevelError)
-	default:
-		slog.Warn("unknown log level", "level", config.LogLevel)
+	if config.LogLevel != "" {
+		monitor.LogLevel(logLevel, config.LogLevel)
 	}
 
 	if err := os.MkdirAll(config.DataDir, 0o755); err != nil {
@@ -121,18 +111,11 @@ func main() {
 	}
 
 	// Setup context and signal handling
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := monitor.SignalContext()
 	defer cancel()
-	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigc
-		slog.Info("signal received, shutting down...")
-		cancel()
-	}()
 
 	jenkins := newJenkinsClient(&config.Jenkins)
-	webhook := NewWebhook(&config.Webhook)
+	webhook := monitor.NewWebhook(&config.Webhook)
 
 	monitor := NewMonitor(&config.Jenkins, jenkins, webhook,
 		filepath.Join(config.DataDir, config.Jenkins.Name+".state"),

@@ -11,8 +11,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -21,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/liweitianux/dflybot/monitor"
 )
 
 type MonitorConfig struct {
@@ -29,7 +29,7 @@ type MonitorConfig struct {
 	RepoDir   string
 	StatePath string
 	Interval  time.Duration
-	Poster    Poster
+	Poster    monitor.Poster
 }
 
 type Monitor struct {
@@ -47,13 +47,6 @@ type State struct {
 	SeenTags map[string]string `json:"seen_tags"`
 	// when the state was last updated
 	UpdatedAt time.Time `json:"updated_at"`
-}
-
-type Poster interface {
-	// Get the max message length
-	GetMaxLength() int
-	// Post the text message
-	Post(ctx context.Context, text string) error
 }
 
 func NewMonitor(cfg *MonitorConfig, base *slog.Logger) *Monitor {
@@ -93,9 +86,7 @@ func (m *Monitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 		m.logger.Warn("state save failed", "error", err)
 	}
 
-	ticker := time.NewTicker(m.config.Interval)
-	defer ticker.Stop()
-	for {
+	monitor.Loop(ctx, m.config.Interval, func() {
 		if m.updateRepo(ctx) == nil {
 			ans := m.collectAnnouncements()
 			if len(ans) > 0 {
@@ -106,35 +97,24 @@ func (m *Monitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 			}
 		}
 		// else: retry at next tick
-
-		select {
-		case <-ctx.Done():
-			m.logger.Debug("monitor exiting")
-			return
-		case <-ticker.C:
-		}
-	}
+	})
+	m.logger.Debug("monitor exiting")
 }
 
 func (m *Monitor) loadState() error {
 	var state State
 	path := m.config.StatePath
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+	exists, err := monitor.ReadJSON(path, &state)
+	if err != nil {
+		m.logger.Error("state file read failure", "path", path, "error", err)
+		return err
+	}
+	if !exists {
 		m.logger.Debug("state file not exist", "path", path)
 		return nil
-	} else {
-		b, err := os.ReadFile(path)
-		if err != nil {
-			m.logger.Error("state file read failure", "path", path, "error", err)
-			return err
-		}
-		if err := json.Unmarshal(b, &state); err != nil {
-			m.logger.Error("state file unmarshal failure", "path", path, "error", err)
-			return err
-		}
-		m.logger.Info("state loaded", "file", path,
-			"branches", len(state.LastSeen), "tags", len(state.SeenTags))
 	}
+	m.logger.Info("state loaded", "file", path,
+		"branches", len(state.LastSeen), "tags", len(state.SeenTags))
 
 	if state.LastSeen == nil {
 		state.LastSeen = make(map[string]string)
@@ -155,21 +135,9 @@ func (m *Monitor) saveState() error {
 	defer m.mutex.Unlock()
 
 	m.state.UpdatedAt = time.Now()
-	b, err := json.MarshalIndent(&m.state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("state marshal failure: %w", err)
+	if err := monitor.SaveJSON(m.config.StatePath, &m.state); err != nil {
+		return fmt.Errorf("state save failure: %w", err)
 	}
-
-	path := m.config.StatePath
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return fmt.Errorf("state file (%s) write failure: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("state file rename (%s -> %s) failure: %w", tmp, path, err)
-	}
-
-	m.logger.Info("state saved", "file", path)
 	return nil
 }
 

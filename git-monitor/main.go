@@ -9,19 +9,18 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"log/slog"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/go-playground/validator/v10"
+
+	"github.com/liweitianux/dflybot/monitor"
 )
 
 // Only need to use a single instance of Validate, which caches struct info.
@@ -34,7 +33,7 @@ type Config struct {
 	// NOTE: Must end with a slash (/) as required by the 'dirpath' validator.
 	DataDir string `toml:"data_dir" validate:"dirpath"`
 	// Webhook settings
-	Webhook ConfigWebhook `toml:"webhook" validate:"required"`
+	Webhook monitor.ConfigWebhook `toml:"webhook" validate:"required"`
 	// List of monitor repos
 	Repos []ConfigRepo `toml:"repos" validate:"required"`
 }
@@ -82,17 +81,8 @@ func main() {
 	if *isDebug {
 		config.LogLevel = "debug"
 	}
-	switch config.LogLevel {
-	case "", "info":
-		logLevel.Set(slog.LevelInfo)
-	case "debug":
-		logLevel.Set(slog.LevelDebug)
-	case "warn":
-		logLevel.Set(slog.LevelWarn)
-	case "error":
-		logLevel.Set(slog.LevelError)
-	default:
-		slog.Warn("unknown log level", "level", config.LogLevel)
+	if config.LogLevel != "" {
+		monitor.LogLevel(logLevel, config.LogLevel)
 	}
 
 	if fi, err := os.Stat(config.DataDir); err != nil {
@@ -108,17 +98,10 @@ func main() {
 	}
 
 	// Setup context and signal handling
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := monitor.SignalContext()
 	defer cancel()
-	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigc
-		slog.Info("signal received, shutting down...")
-		cancel()
-	}()
 
-	webhook := NewWebhook(&config.Webhook)
+	webhook := monitor.NewWebhook(&config.Webhook)
 	wg := &sync.WaitGroup{}
 
 	for _, repo := range config.Repos {
@@ -132,7 +115,7 @@ func main() {
 			RepoDir:   filepath.Join(config.DataDir, repo.Name+".git"),
 			StatePath: filepath.Join(config.DataDir, repo.Name+".state"),
 			Interval:  time.Duration(repo.Interval) * time.Second,
-			Poster:   webhook,
+			Poster:    webhook,
 		}, nil)
 		wg.Add(1)
 		go monitor.Start(ctx, wg)
