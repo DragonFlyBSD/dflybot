@@ -43,18 +43,22 @@ func TestSaveAndReadJSON(t *testing.T) {
 	}
 }
 
-func TestAppendJSONL(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "h.jsonl")
-	for _, v := range []any{map[string]int{"n": 1}, map[string]int{"n": 2}} {
-		if err := AppendJSONL(path, v); err != nil {
-			t.Fatal(err)
-		}
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
+func TestHistory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "h.jsonl")
+	h := NewHistory(path)
+
+	// Batched appends: several lines flushed with one call.
+	if err := h.Append(map[string]int{"n": 1}); err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	if err := h.Append(map[string]int{"n": 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	lines := readLines(t, path)
 	if len(lines) != 2 {
 		t.Fatalf("lines = %v", lines)
 	}
@@ -64,6 +68,48 @@ func TestAppendJSONL(t *testing.T) {
 			t.Errorf("line %d = %q", i, l)
 		}
 	}
+
+	// Further appends in a later batch.
+	if err := h.Append(map[string]int{"n": 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if lines = readLines(t, path); len(lines) != 3 {
+		t.Fatalf("lines after second flush = %v", lines)
+	}
+
+	// An empty flush is a no-op and must not create other files.
+	if err := NewHistory(filepath.Join(dir, "nope.jsonl")).Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "nope.jsonl")); !os.IsNotExist(err) {
+		t.Errorf("empty flush created a file")
+	}
+
+	// Close flushes the remaining lines and rejects further Appends.
+	if err := h.Append(map[string]int{"n": 4}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if lines = readLines(t, path); len(lines) != 4 {
+		t.Fatalf("lines after Close = %v", lines)
+	}
+	if err := h.Append(map[string]int{"n": 5}); err != ErrClosed {
+		t.Errorf("Append after Close = %v, want ErrClosed", err)
+	}
+}
+
+func readLines(t *testing.T, path string) []string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimRight(string(b), "\n"), "\n")
 }
 
 func TestLoop(t *testing.T) {

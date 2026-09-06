@@ -104,6 +104,9 @@ type Monitor struct {
 	// firstPoll marks the first successful poll after (re)start, during
 	// which only the current failures are announced (see rules above).
 	firstPoll bool
+	// history buffers the history lines of one poll round and flushes them
+	// with a single file append at the end of the poll (see monitor pkg).
+	history *monitor.History
 }
 
 func NewMonitor(cfg *ConfigJenkins, jenkins *jenkinsClient, poster monitor.Poster,
@@ -118,6 +121,7 @@ func NewMonitor(cfg *ConfigJenkins, jenkins *jenkinsClient, poster monitor.Poste
 		poster:      poster,
 		statePath:   statePath,
 		historyPath: historyPath,
+		history:     monitor.NewHistory(historyPath),
 		logger:      logger,
 		state: monitorState{
 			Version: stateVersion,
@@ -129,6 +133,9 @@ func NewMonitor(cfg *ConfigJenkins, jenkins *jenkinsClient, poster monitor.Poste
 
 func (m *Monitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 	defer func() {
+		if err := m.history.Close(); err != nil {
+			m.logger.Warn("history close failure", "error", err)
+		}
 		m.saveState()
 		wg.Done()
 	}()
@@ -159,6 +166,11 @@ func (m *Monitor) poll() {
 	if err := m.pollNodes(now); err != nil {
 		m.logger.Warn("node poll failed", "error", err)
 		ok = false
+	}
+	// Flush the poll's history lines even when parts failed, so that the
+	// lines of the successfully polled jobs are not lost.
+	if err := m.history.Flush(); err != nil {
+		m.logger.Error("history flush failure", "path", m.historyPath, "error", err)
 	}
 	if !ok {
 		return
@@ -428,11 +440,11 @@ func (m *Monitor) jobHistory(name string, st *jobState) historyLine {
 		State: st.State, Result: st.LastResult, Build: st.LastBuild, URL: st.LastURL}
 }
 
-// logHistory appends one JSONL line to the history file.
+// logHistory buffers one history line of the current poll round.
 func (m *Monitor) logHistory(t time.Time, h historyLine) {
 	h.Timestamp = t.UTC()
-	if err := monitor.AppendJSONL(m.historyPath, h); err != nil {
-		m.logger.Error("history append failure", "path", m.historyPath, "error", err)
+	if err := m.history.Append(h); err != nil {
+		m.logger.Error("history append failure", "error", err)
 	}
 }
 
