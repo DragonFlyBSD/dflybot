@@ -1,0 +1,211 @@
+// Copyright (c) 2026 Aaron LI
+//
+// Tests for the GitHub events client (stub server, no real GitHub).
+//
+// Co-authored-by: DeepSeek-v4-flash (with Pi Coding Agent)
+//
+
+package main
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func eventJSON(typ, id string, action string) string {
+	// Minimal event JSON for the various types; ids exercised as strings.
+	issue := `{"number":12,"title":"fix foo","html_url":"https://github.com/o/r/issues/12",
+		"state":"open","user":{"login":"bob"}}`
+	pr := `{"number":200,"title":"big change","html_url":"https://github.com/o/r/pull/200",
+		"user":{"login":"carol"}}`
+	var payload string
+	switch typ {
+	case "IssuesEvent":
+		payload = `"action":"` + action + `","issue":` + issue
+	case "PullRequestEvent":
+		payload = `"action":"` + action + `","pull_request":` + pr
+	case "IssueCommentEvent":
+		payload = `"action":"created","issue":` + issue + `,"comment":{"body":"looks good"}`
+	}
+	if payload == "" {
+		return ""
+	}
+	return `{"id":"` + id + `","type":"` + typ + `","created_at":"2026-09-06T12:00:00Z",
+		"actor":{"login":"aly"},"payload":{` + payload + `}}`
+}
+
+func decodeEvent(t *testing.T, raw string) *ghEvent {
+	t.Helper()
+	var e ghEvent
+	if err := json.Unmarshal([]byte(raw), &e); err != nil {
+		t.Fatalf("decode event %q: %v", raw, err)
+	}
+	return &e
+}
+
+func TestEventIDTolerance(t *testing.T) {
+	// id as a JSON string.
+	e := decodeEvent(t, eventJSON("IssuesEvent", "9001", "opened"))
+	if int64(e.ID) != 9001 {
+		t.Errorf("id = %d", e.ID)
+	}
+	// id as a JSON number.
+	var e2 ghEvent
+	if err := json.Unmarshal([]byte(strings.Replace(
+		eventJSON("IssuesEvent", "9002", "opened"), `"9002"`, "9002", 1)), &e2); err != nil {
+		t.Fatal(err)
+	}
+	if int64(e2.ID) != 9002 {
+		t.Errorf("numeric id = %d", e2.ID)
+	}
+}
+
+func TestClassify(t *testing.T) {
+	mon := NewRepoMonitor(&ConfigRepo{Project: "o", Repo: "r"}, nil, nil, t.TempDir(), nil)
+	tests := []struct {
+		raw        string
+		wantAction string
+		wantOK     bool
+	}{
+		{eventJSON("IssuesEvent", "1", "opened"), "create", true},
+		{eventJSON("IssuesEvent", "2", "closed"), "close", true},
+		{eventJSON("IssuesEvent", "3", "reopened"), "reopen", true},
+		{eventJSON("IssuesEvent", "4", "labeled"), "", false}, // unsupported
+		{eventJSON("PullRequestEvent", "5", "opened"), "create", true},
+		{eventJSON("PullRequestEvent", "6", "synchronize"), "update", true},
+		{eventJSON("PullRequestEvent", "7", "edited"), "update", true},
+		{eventJSON("PullRequestEvent", "8", "closed"), "close", true},
+		{eventJSON("PullRequestEvent", "9", "ready_for_review"), "", false},
+		{eventJSON("IssueCommentEvent", "10", "created"), "comment", true},
+		{`{"type":"PushEvent","id":"11","payload":{}}`, "", false},
+	}
+	for _, tt := range tests {
+		a, ok := mon.classify(decodeEvent(t, tt.raw))
+		if ok != tt.wantOK {
+			t.Errorf("%s: ok=%v, want %v", tt.raw[:30], ok, tt.wantOK)
+			continue
+		}
+		if ok && a.action != tt.wantAction {
+			t.Errorf("%s: action=%s, want %s", tt.raw[:30], a.action, tt.wantAction)
+		}
+	}
+}
+
+func TestClassifyMergedPR(t *testing.T) {
+	raw := `{"id":"1","type":"PullRequestEvent","created_at":"2026-09-06T12:00:00Z",
+		"actor":{"login":"aly"},"payload":{"action":"closed","pull_request":{
+		"number":200,"title":"big change","html_url":"https://github.com/o/r/pull/200",
+		"user":{"login":"carol"},"merged":true,"merged_at":"2026-09-06T11:00:00Z"}}}`
+	mon := NewRepoMonitor(&ConfigRepo{Project: "o", Repo: "r"}, nil, nil, t.TempDir(), nil)
+	a, ok := mon.classify(decodeEvent(t, raw))
+	if !ok || a.action != "merge" {
+		t.Fatalf("merged PR classified as %+v, ok=%v", a, ok)
+	}
+}
+
+func TestActionWanted(t *testing.T) {
+	tests := []struct {
+		kind, action string
+		issues       []string
+		pulls        []string
+		want         bool
+	}{
+		{activityIssue, "create", []string{"create", "comment", "close"}, []string{}, true},
+		{activityIssue, "close", []string{"create", "comment", "close"}, []string{}, true},
+		{activityIssue, "reopen", []string{"create", "comment", "close"}, []string{}, false},
+		{activityIssue, "reopen", nil, nil, true}, // empty means all
+		{activityPR, "merge", nil, []string{"create", "close"}, false},
+		{activityPR, "update", nil, nil, true},
+		{activityPR, "merge", nil, nil, true},
+	}
+	for _, tt := range tests {
+		if got := actionWanted(tt.kind, tt.action, tt.issues, tt.pulls); got != tt.want {
+			t.Errorf("actionWanted(%s,%s,%v,%v) = %v, want %v",
+				tt.kind, tt.action, tt.issues, tt.pulls, got, tt.want)
+		}
+	}
+}
+
+func TestFetchEventsAndETag(t *testing.T) {
+	page := "[" + eventJSON("IssuesEvent", "100", "opened") + "]"
+	var ifNone string
+	var calls int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		ifNone = r.Header.Get("If-None-Match")
+		w.Header().Set("ETag", `"abc"`)
+		if ifNone == `"abc"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(page))
+	}))
+	defer ts.Close()
+
+	c := newGitHubClient("tok")
+	c.baseURL = ts.URL
+	events, _, modified, err := c.fetchEvents("o", "r", "", 0)
+	if err != nil || !modified || len(events) != 1 || int64(events[0].ID) != 100 {
+		t.Fatalf("first fetch = %d events, modified=%v, err=%v", len(events), modified, err)
+	}
+	// Second fetch with the etag: 304, nothing new.
+	events2, etag2, modified2, err := c.fetchEvents("o", "r", `"abc"`, 100)
+	if err != nil || modified2 || len(events2) != 0 || etag2 == "" {
+		t.Fatalf("304 fetch = %v events, modified=%v, etag=%q, err=%v", len(events2), modified2, etag2, err)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d", calls)
+	}
+}
+
+func TestFetchEventsPaging(t *testing.T) {
+	p1 := "[" + eventJSON("IssuesEvent", "201", "opened") + "]"
+	p2 := "[" + eventJSON("IssuesEvent", "200", "closed") + "]"
+	page2 := false
+	var nextURL string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.RawQuery, "page=2") {
+			page2 = true
+			w.Write([]byte(p2))
+			return
+		}
+		w.Header().Set("Link", `<`+nextURL+`>; rel="next"`)
+		w.Write([]byte(p1))
+	}))
+	defer ts.Close()
+	nextURL = ts.URL + "/x?per_page=100&page=2"
+
+	c := newGitHubClient("")
+	c.baseURL = ts.URL
+	events, _, _, err := c.fetchEvents("o", "r", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2 (page2 fetched=%v)", len(events), page2)
+	}
+}
+
+func TestFetchEventsStopsAtWatermark(t *testing.T) {
+	p1 := "[" + eventJSON("IssuesEvent", "300", "opened") + "]"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.RawQuery, "page=2") {
+			t.Error("should not fetch page 2 past the watermark")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(p1))
+	}))
+	defer ts.Close()
+
+	c := newGitHubClient("")
+	c.baseURL = ts.URL
+	events, _, _, err := c.fetchEvents("o", "r", "", eventID(200))
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events=%v err=%v", len(events), err)
+	}
+}
