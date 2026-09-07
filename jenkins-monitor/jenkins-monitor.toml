@@ -1,0 +1,43 @@
+# Logger level: debug, info, warn, error
+log_level = "info"
+
+# Work directory to hold the state and history files.
+# Can be a relative path to this config file.
+# NOTE: Must end with a slash (/).
+data_dir = "./data/jenkins/"
+
+# The Jenkins to monitor.
+[jenkins]
+# Instance name (also names the state/history files, e.g., dragonfly.state)
+name = "dragonfly"
+# Base URL of the Jenkins
+url = "https://ci.dragonflybsd.org/"
+# Poll and state/history flush interval in seconds
+interval = 60
+# List of jobs to monitor
+jobs = [
+    "DragonFlyBSD",
+    "DragonFlyBSD_RELEASE",
+    "dragonflybsd-complete",
+]
+
+# Optional: permanent execution nodes to monitor, excluding the ephemeral
+# agents; empty means monitor all computers.
+# nodes = ["Built-In Node"]
+
+# Optional credentials for private instances (basic auth).
+# user = ""
+# password = ""
+# api_token = ""
+
+[webhook]
+# Webhook URL
+url = "http://127.0.0.1:2018/webhook"
+# Request method
+method = "POST"
+# Bearer token to authenticate
+token = "???"
+# Name to identify this tool
+from = "jenkins-monitor"
+# Target to announce the messages
+target = "#dragonflybsd"

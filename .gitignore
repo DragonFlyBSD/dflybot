@@ -1,5 +1,6 @@
 /dflybot
 /dflybot.*
+!dflybot.toml
 _*
 *.bak
 *.old

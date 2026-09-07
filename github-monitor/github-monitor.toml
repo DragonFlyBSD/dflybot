@@ -1,0 +1,40 @@
+# Logger level: debug, info, warn, error
+log_level = "info"
+
+# Work directory to hold the per-repo state and history files.
+# Layout: data_dir/<project>/<repo>.state and .history
+# NOTE: Must end with a slash (/) as required by the 'dirpath' validator.
+data_dir = "./data/github/"
+
+# Optional GitHub API token.  Recommended even for public repos (rate
+# limits) and required for private repos.
+# [github]
+# token = "ghp_..."
+
+# List of repos to monitor.
+[[repos]]
+# Whether enabled?
+enabled = true
+# Project (owner) and repository name.
+project = "DragonFlyBSD"
+repo = "DragonFlyBSD"
+# Issue actions to announce; empty means all supported actions
+# (create, comment, close, reopen).
+issue_actions = []
+# Pull request actions to announce; empty means all supported actions
+# (create, comment, update, close, merge, reopen).
+pr_actions = []
+# Poll interval in seconds.
+interval = 60
+
+[webhook]
+# Webhook URL
+url = "http://127.0.0.1:2018/webhook"
+# Request method
+method = "POST"
+# Bearer token to authenticate
+token = "???"
+# Name to identify this tool
+from = "github-monitor"
+# Target to announce the messages
+target = "#dragonflybsd"

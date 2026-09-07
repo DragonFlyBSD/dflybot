@@ -1,0 +1,57 @@
+# Logger level: debug, info, warn, error
+log_level = "info"
+
+# Work directory to hold the per-web state and history files.
+# Layout: data_dir/<name>.state and <name>.history
+# NOTE: Must end with a slash (/).
+data_dir = "./data/web/"
+
+# TLS/certificate settings (default system trust store).
+[tls]
+# Optional PEM CA bundle; empty uses the system trust store.
+ca_file = ""
+# Certificate expiry warning thresholds, in days.
+# Empty uses the default [15, 7, 3, 2, 1].
+expiring_days = [15, 7, 3, 2, 1]
+
+# Down/up hysteresis: consecutive failures declare a web down; consecutive
+# successes declare a recovery.
+[alert]
+down_repeats = 5
+up_repeats = 3
+
+# Probe timeouts in milliseconds.
+[timeouts]
+dns = 3000
+connect = 3000
+header = 5000
+total = 10000
+
+[webhook]
+# Webhook URL
+url = "http://127.0.0.1:2018/webhook"
+# Request method
+method = "POST"
+# Bearer token to authenticate
+token = "???"
+# Name to identify this tool
+from = "web-monitor"
+# Target to announce the messages
+target = "#dragonflybsd"
+
+# List of webs to monitor.
+[[webs]]
+# Whether enabled?
+enabled = true
+# Unique name (also names the state/history files)
+name = "www"
+# URL to probe (scheme://host[:port]/path)
+url = "https://www.dragonflybsd.org/"
+# Probe interval in seconds
+interval = 30
+# Expected HTTP status codes; empty means any 2xx
+status_codes = [200, 204]
+# Whether to follow HTTP redirects (default: true)
+follow_redirection = true
+# Whether to verify the TLS certificate (default: true; https only)
+tls_verify = true

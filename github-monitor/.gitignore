@@ -1,2 +1,3 @@
 /github-monitor
 /github-monitor.*
+!github-monitor.toml

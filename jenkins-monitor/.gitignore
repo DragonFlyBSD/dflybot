@@ -1,2 +1,3 @@
 /jenkins-monitor
 /jenkins-monitor.*
+!jenkins-monitor.toml
