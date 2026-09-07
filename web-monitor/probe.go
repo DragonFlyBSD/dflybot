@@ -29,7 +29,7 @@ const (
 	defaultDNSMs     = 3000
 	defaultConnectMs = 3000
 	defaultHeaderMs  = 5000
-	defaultBodyMs    = 10000
+	defaultTotalMs   = 10000
 )
 
 // timeouts are the resolved probe timeouts of a web.
@@ -37,7 +37,7 @@ type timeouts struct {
 	dns     time.Duration
 	connect time.Duration
 	header  time.Duration
-	body    time.Duration
+	total   time.Duration
 }
 
 func resolveTimeouts(c *ConfigTimeouts) timeouts {
@@ -51,7 +51,7 @@ func resolveTimeouts(c *ConfigTimeouts) timeouts {
 		dns:     ms(c.DNS, defaultDNSMs),
 		connect: ms(c.Connect, defaultConnectMs),
 		header:  ms(c.Header, defaultHeaderMs),
-		body:    ms(c.Body, defaultBodyMs),
+		total:   ms(c.Total, defaultTotalMs),
 	}
 }
 
@@ -65,12 +65,13 @@ type prober struct {
 
 // newProber builds the HTTP client for one web from the per-web and the
 // global (tls, timeouts) settings.
-func newProber(web *ConfigWeb, tlsCfg *ConfigTLS, to timeouts, follow bool, verify bool) (*prober, error) {
+func newProber(web *ConfigWeb, tlsCfg *ConfigTLS, toCfg *ConfigTimeouts, follow bool, verify bool) (*prober, error) {
 	u, err := url.Parse(web.URL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, fmt.Errorf("invalid url %q", web.URL)
 	}
 
+	to := resolveTimeouts(toCfg)
 	resolver := &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -105,7 +106,7 @@ func newProber(web *ConfigWeb, tlsCfg *ConfigTLS, to timeouts, follow bool, veri
 		ResponseHeaderTimeout: to.header,
 		Proxy:                 http.ProxyFromEnvironment,
 	}
-	client := &http.Client{Transport: transport, Timeout: to.body}
+	client := &http.Client{Transport: transport, Timeout: to.total}
 	if !follow {
 		client.CheckRedirect = func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -158,6 +159,7 @@ func (p *prober) Probe() *probeResult {
 	if err != nil {
 		return &probeResult{ok: false, reason: err.Error()}
 	}
+
 	resp, err := p.client.Do(req)
 	ms := time.Since(start).Milliseconds()
 	res := &probeResult{ms: ms}
@@ -169,13 +171,6 @@ func (p *prober) Probe() *probeResult {
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body) // drain; the client Timeout bounds it
 
-	res.status = resp.StatusCode
-	res.ok = p.statusOK(resp.StatusCode)
-	if !res.ok {
-		res.reason = fmt.Sprintf("unexpected status %d", resp.StatusCode)
-		return res
-	}
-
 	if p.verifyTLS && resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
 		leaf := resp.TLS.PeerCertificates[0]
 		res.cert = &certInfo{
@@ -183,6 +178,13 @@ func (p *prober) Probe() *probeResult {
 			daysLeft:     int(math.Floor(time.Until(leaf.NotAfter).Hours() / 24)),
 		}
 	}
+
+	res.status = resp.StatusCode
+	res.ok = p.statusOK(resp.StatusCode)
+	if !res.ok {
+		res.reason = fmt.Sprintf("unexpected status %d", resp.StatusCode)
+	}
+
 	return res
 }
 
@@ -198,7 +200,7 @@ func classifyError(err error) string {
 		msg = uerr.Err.Error()
 	}
 	if msg == "" {
-		return "error"
+		msg = "error"
 	}
 	return msg
 }

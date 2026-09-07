@@ -122,9 +122,12 @@ func (m *WebMonitor) poll() {
 		hist.DaysLeft = res.cert.daysLeft
 	}
 
-	msgs := m.updateState(res, now)
+	var msgs []string
+	if msg := m.updateState(res); msg != "" {
+		msgs = append(msgs, msg)
+	}
 	if res.cert != nil {
-		if msg := m.updateCert(res.cert, now); msg != "" {
+		if msg := m.updateCert(res.cert); msg != "" {
 			msgs = append(msgs, msg)
 		}
 	}
@@ -144,30 +147,23 @@ func (m *WebMonitor) poll() {
 
 // updateState applies the probe result to the hysteresis state machine and
 // returns any announcement messages.
-func (m *WebMonitor) updateState(res *probeResult, now time.Time) []string {
-	var msgs []string
+func (m *WebMonitor) updateState(res *probeResult) string {
+	var msg string
 	st := &m.state
 	switch st.State {
-	case stateUnknown:
+	case stateUnknown, stateUp:
 		if res.ok {
-			st.State = stateUp
-		} else {
-			st.PendingDown++
-			if st.PendingDown >= m.alert.DownRepeats {
-				st.State = stateDown
+			if st.State == stateUnknown {
+				st.State = stateUp
+			} else {
 				st.PendingDown = 0
-				msgs = append(msgs, m.downMsg(res))
 			}
-		}
-	case stateUp:
-		if res.ok {
-			st.PendingDown = 0
 		} else {
 			st.PendingDown++
 			if st.PendingDown >= m.alert.DownRepeats {
 				st.State = stateDown
 				st.PendingDown = 0
-				msgs = append(msgs, m.downMsg(res))
+				msg = m.downMsg(res)
 			}
 		}
 	case stateDown:
@@ -176,18 +172,18 @@ func (m *WebMonitor) updateState(res *probeResult, now time.Time) []string {
 			if st.PendingUp >= m.alert.UpRepeats {
 				st.State = stateUp
 				st.PendingUp = 0
-				msgs = append(msgs, m.upMsg(res))
+				msg = m.upMsg(res)
 			}
 		} else {
 			st.PendingUp = 0
 		}
 	}
-	return msgs
+	return msg
 }
 
 // updateCert checks the certificate expiry thresholds and returns a warning
 // message when a new threshold is crossed (once per threshold per cert).
-func (m *WebMonitor) updateCert(cert *certInfo, now time.Time) string {
+func (m *WebMonitor) updateCert(cert *certInfo) string {
 	if m.state.CertNotAfterUnix != cert.notAfterUnix {
 		// New certificate: start over.
 		m.state.CertNotAfterUnix = cert.notAfterUnix
@@ -227,8 +223,7 @@ func (m *WebMonitor) downMsg(res *probeResult) string {
 }
 
 func (m *WebMonitor) upMsg(res *probeResult) string {
-	return m.prefix(fmt.Sprintf("UP: %s recovered after %d consecutive failures",
-		m.cfg.URL, m.alert.DownRepeats))
+	return m.prefix(fmt.Sprintf("UP: %s recovered", m.cfg.URL))
 }
 
 func (m *WebMonitor) post(text string) {

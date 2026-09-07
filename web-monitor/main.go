@@ -62,7 +62,7 @@ type ConfigTimeouts struct {
 	DNS     int `toml:"dns"`
 	Connect int `toml:"connect"`
 	Header  int `toml:"header"`
-	Body    int `toml:"body"`
+	Total   int `toml:"total"`
 }
 
 type ConfigWeb struct {
@@ -131,7 +131,6 @@ func main() {
 	ctx, cancel := monitor.SignalContext()
 	defer cancel()
 
-	to := resolveTimeouts(&config.Timeouts)
 	webhook := monitor.NewWebhook(&config.Webhook)
 	wg := &sync.WaitGroup{}
 
@@ -149,7 +148,7 @@ func main() {
 		if web.TLSVerify != nil {
 			verify = *web.TLSVerify
 		}
-		prober, err := newProber(web, &config.TLS, to, follow, verify)
+		prober, err := newProber(web, &config.TLS, &config.Timeouts, follow, verify)
 		if err != nil {
 			slog.Error("prober setup failed", "name", web.Name, "error", err)
 			os.Exit(1)

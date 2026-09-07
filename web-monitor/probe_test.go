@@ -3,6 +3,8 @@
 // Tests for the HTTP prober (stub servers; a TLS fixture is generated
 // locally).
 //
+// Co-authored-by: DeepSeek-v4-flash (with Pi Coding Agent)
+//
 
 package main
 
@@ -22,8 +24,7 @@ import (
 func testProber(t *testing.T, url string, codes []int, follow, verify bool) *prober {
 	t.Helper()
 	web := &ConfigWeb{Name: "w", URL: url, StatusCodes: codes}
-	to := resolveTimeouts(&ConfigTimeouts{})
-	p, err := newProber(web, &ConfigTLS{}, to, follow, verify)
+	p, err := newProber(web, &ConfigTLS{}, &ConfigTimeouts{}, follow, verify)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +130,7 @@ func TestProbeTLSVerify(t *testing.T) {
 	// Verify with the server's own certificate as the trust store.
 	caFile := certPEM(t, ts.Certificate().Raw)
 	web := &ConfigWeb{Name: "w", URL: ts.URL}
-	p, err := newProber(web, &ConfigTLS{CAFile: caFile}, resolveTimeouts(&ConfigTimeouts{}), true, true)
+	p, err := newProber(web, &ConfigTLS{CAFile: caFile}, &ConfigTimeouts{}, true, true)
 	if err != nil {
 		t.Fatal(err)
 	}

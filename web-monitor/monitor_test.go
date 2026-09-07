@@ -3,6 +3,8 @@
 // Tests for the web monitor state machine (hysteresis, certificate
 // thresholds) and the end-to-end poll loop against a stub HTTP server.
 //
+// Co-authored-by: DeepSeek-v4-flash (with Pi Coding Agent)
+//
 
 package main
 
@@ -53,35 +55,34 @@ func newStateMon(down, up int) *WebMonitor {
 func TestHysteresis(t *testing.T) {
 	mon := newStateMon(2, 2)
 	poster := mon.poster.(*recordPoster)
-	now := time.Now()
 
-	if msgs := mon.updateState(&probeResult{ok: true}, now); len(msgs) != 0 {
-		t.Fatalf("startup ok announced: %v", msgs)
+	if msg := mon.updateState(&probeResult{ok: true}); msg != "" {
+		t.Fatalf("startup ok announced: %s", msg)
 	}
 	// One failure is not enough.
-	if msgs := mon.updateState(&probeResult{ok: false, reason: "timeout"}, now); len(msgs) != 0 {
-		t.Fatalf("first failure announced: %v", msgs)
+	if msg := mon.updateState(&probeResult{ok: false, reason: "timeout"}); msg != "" {
+		t.Fatalf("first failure announced: %s", msg)
 	}
 	if mon.state.State != stateUp {
 		t.Fatalf("state = %q, want up", mon.state.State)
 	}
 	// Second consecutive failure declares down.
-	if msgs := mon.updateState(&probeResult{ok: false, reason: "timeout"}, now); len(msgs) != 1 ||
-		!strings.Contains(msgs[0], "DOWN: https://example.com/") {
-		t.Fatalf("down messages = %v", msgs)
+	if msg := mon.updateState(&probeResult{ok: false, reason: "timeout"}); msg == "" ||
+		!strings.Contains(msg, "DOWN: https://example.com/") {
+		t.Fatalf("down messages = %s", msg)
 	}
 	// Still failing: no re-announcement.
-	if msgs := mon.updateState(&probeResult{ok: false, reason: "timeout"}, now); len(msgs) != 0 {
-		t.Fatalf("continued failure announced: %v", msgs)
+	if msg := mon.updateState(&probeResult{ok: false, reason: "timeout"}); msg != "" {
+		t.Fatalf("continued failure announced: %s", msg)
 	}
 	// One success is not enough to recover.
-	if msgs := mon.updateState(&probeResult{ok: true, status: 200}, now); len(msgs) != 0 {
-		t.Fatalf("first success announced: %v", msgs)
+	if msg := mon.updateState(&probeResult{ok: true, status: 200}); msg != "" {
+		t.Fatalf("first success announced: %s", msg)
 	}
 	// Second consecutive success recovers.
-	if msgs := mon.updateState(&probeResult{ok: true, status: 200}, now); len(msgs) != 1 ||
-		!strings.Contains(msgs[0], "UP:") {
-		t.Fatalf("up messages = %v", msgs)
+	if msg := mon.updateState(&probeResult{ok: true, status: 200}); msg == "" ||
+		!strings.Contains(msg, "UP:") {
+		t.Fatalf("up messages = %s", msg)
 	}
 	if mon.state.State != stateUp {
 		t.Fatalf("state = %q, want up", mon.state.State)
@@ -91,11 +92,10 @@ func TestHysteresis(t *testing.T) {
 
 func TestStartupDown(t *testing.T) {
 	mon := newStateMon(2, 2)
-	now := time.Now()
 	// A site that is down from the start is announced after the window.
-	mon.updateState(&probeResult{ok: false, reason: "refused"}, now)
-	if msgs := mon.updateState(&probeResult{ok: false, reason: "refused"}, now); len(msgs) != 1 {
-		t.Fatalf("startup down messages = %v", msgs)
+	mon.updateState(&probeResult{ok: false, reason: "refused"})
+	if msg := mon.updateState(&probeResult{ok: false, reason: "refused"}); msg == "" {
+		t.Fatalf("no startup down messages")
 	}
 	if mon.state.State != stateDown {
 		t.Fatalf("state = %q", mon.state.State)
@@ -112,36 +112,36 @@ func TestCertThresholds(t *testing.T) {
 
 	// New certificate, plenty of days left: no warning, but initialized.
 	na := now.Add(30 * 24 * time.Hour)
-	if msg := mon.updateCert(certInfoAt(na, 30), now); msg != "" {
+	if msg := mon.updateCert(certInfoAt(na, 30)); msg != "" {
 		t.Fatalf("unexpected warning: %q", msg)
 	}
 	// Crosses 15: warn once.
 	na = now.Add(12 * 24 * time.Hour)
-	if msg := mon.updateCert(certInfoAt(na, 12), now); !strings.Contains(msg, "expires in 12 day(s)") {
+	if msg := mon.updateCert(certInfoAt(na, 12)); !strings.Contains(msg, "expires in 12 day(s)") {
 		t.Fatalf("warn at 12 days: %q", msg)
 	}
 	// Same days again: no repeat.
-	if msg := mon.updateCert(certInfoAt(na, 12), now); msg != "" {
+	if msg := mon.updateCert(certInfoAt(na, 12)); msg != "" {
 		t.Fatalf("repeat warning: %q", msg)
 	}
 	// Crosses 7 and then 1.
-	if msg := mon.updateCert(certInfoAt(na.Add(-6*24*time.Hour), 6), now); !strings.Contains(msg, "expires in 6 day(s)") {
+	if msg := mon.updateCert(certInfoAt(na.Add(-6*24*time.Hour), 6)); !strings.Contains(msg, "expires in 6 day(s)") {
 		t.Fatalf("warn at 6 days: %q", msg)
 	}
-	if msg := mon.updateCert(certInfoAt(na.Add(-11*24*time.Hour), 1), now); !strings.Contains(msg, "expires in 1 day(s)") {
+	if msg := mon.updateCert(certInfoAt(na.Add(-11*24*time.Hour), 1)); !strings.Contains(msg, "expires in 1 day(s)") {
 		t.Fatalf("warn at 1 day: %q", msg)
 	}
 	// Expired: warn once.
 	na = now.Add(-24 * time.Hour)
-	if msg := mon.updateCert(certInfoAt(na, -1), now); !strings.Contains(msg, "certificate expired") {
+	if msg := mon.updateCert(certInfoAt(na, -1)); !strings.Contains(msg, "certificate expired") {
 		t.Fatalf("expired warning: %q", msg)
 	}
-	if msg := mon.updateCert(certInfoAt(na, -2), now); msg != "" {
+	if msg := mon.updateCert(certInfoAt(na, -2)); msg != "" {
 		t.Fatalf("expired repeat warning: %q", msg)
 	}
 	// A new certificate resets the warnings.
 	na = now.Add(20 * 24 * time.Hour)
-	if msg := mon.updateCert(certInfoAt(na, 20), now); msg != "" {
+	if msg := mon.updateCert(certInfoAt(na, 20)); msg != "" {
 		t.Fatalf("new cert unexpected warning: %q", msg)
 	}
 }
@@ -160,7 +160,7 @@ func TestEndToEndPoll(t *testing.T) {
 
 	poster := &recordPoster{}
 	web := &ConfigWeb{Name: "w", URL: ts.URL, Interval: 30}
-	p, err := newProber(web, &ConfigTLS{}, resolveTimeouts(&ConfigTimeouts{}), true, false)
+	p, err := newProber(web, &ConfigTLS{}, &ConfigTimeouts{}, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
