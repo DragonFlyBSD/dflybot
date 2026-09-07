@@ -20,7 +20,7 @@
 //
 // The monitor runs its poll loop in a single goroutine; no locking needed.
 //
-// Co-authored-by: Deepseek-v4-flash (wit Pi Coding Agent)
+// Co-authored-by: DeepSeek-v4-flash (with Pi Coding Agent)
 //
 
 package main
@@ -62,11 +62,31 @@ type jobState struct {
 	LastSeen    int64  `json:"last_seen"` // unix seconds of the last poll
 }
 
+func (st *jobState) toHistory(name string) *historyLine {
+	return &historyLine{
+		Type:   "job",
+		Name:   name,
+		State:  st.State,
+		Result: st.LastResult,
+		Build:  st.LastBuild,
+		URL:    st.LastURL,
+	}
+}
+
 // nodeState is the persisted per-node tracking state.
 type nodeState struct {
 	Offline bool   `json:"offline"`
 	Reason  string `json:"reason"`
 	Seen    int64  `json:"seen"`
+}
+
+func (st *nodeState) toHistory(name string) *historyLine {
+	return &historyLine{
+		Type:    "node",
+		Name:    name,
+		Offline: &st.Offline,
+		Reason:  st.Reason,
+	}
 }
 
 // monitorState is the on-disk JSON structure of the whole monitor state.
@@ -109,8 +129,14 @@ type Monitor struct {
 	history *monitor.History
 }
 
-func NewMonitor(cfg *ConfigJenkins, jenkins *jenkinsClient, poster monitor.Poster,
-	statePath, historyPath string, base *slog.Logger) *Monitor {
+func NewMonitor(
+	cfg *ConfigJenkins,
+	jenkins *jenkinsClient,
+	poster monitor.Poster,
+	statePath string,
+	historyPath string,
+	base *slog.Logger,
+) *Monitor {
 	if base == nil {
 		base = slog.Default()
 	}
@@ -152,18 +178,17 @@ func (m *Monitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 
 // poll checks all jobs and nodes once and announces any state changes.
 func (m *Monitor) poll() {
-	now := time.Now()
 	// Poll errors are logged and skipped so that a Jenkins outage never
 	// causes bogus "recovery" announcements.  State is only saved (and the
 	// first-poll handling left behind) after a fully successful poll.
 	ok := true
 	for _, name := range m.cfg.Jobs {
-		if err := m.pollJob(name, now); err != nil {
+		if err := m.pollJob(name); err != nil {
 			m.logger.Warn("job poll failed", "job", name, "error", err)
 			ok = false
 		}
 	}
-	if err := m.pollNodes(now); err != nil {
+	if err := m.pollNodes(); err != nil {
 		m.logger.Warn("node poll failed", "error", err)
 		ok = false
 	}
@@ -175,15 +200,15 @@ func (m *Monitor) poll() {
 	if !ok {
 		return
 	}
-	if m.firstPoll {
-		m.firstPoll = false
-	}
-	m.state.UpdatedAt = now.Unix()
+
+	m.firstPoll = false
+	m.state.UpdatedAt = time.Now().Unix()
 	m.saveState()
 }
 
 // pollJob announces any new failed build(s) of one job.
-func (m *Monitor) pollJob(name string, now time.Time) error {
+func (m *Monitor) pollJob(name string) error {
+	now := time.Now()
 	cur, err := m.jenkins.lastCompleted(name)
 	if err != nil {
 		return err
@@ -197,24 +222,19 @@ func (m *Monitor) pollJob(name string, now time.Time) error {
 		st = &jobState{State: stateUnknown}
 		m.state.Jobs[name] = st
 	}
+	st.LastSeen = now.Unix()
+
+	if st.LastBuild == cur.Number {
+		// No new build; nothing to announce.
+		m.logHistory(st.toHistory(name))
+		return nil
+	}
 
 	// Startup (re)handling: only announce the current failure, and skip it
 	// if the same failed build was already announced in a previous run.
 	if m.firstPoll || st.LastBuild == 0 {
-		if st.LastBuild == cur.Number {
-			// No new build since the last run; nothing to announce.
-			m.logHistory(now, m.jobHistory(name, st))
-			return nil
-		}
 		m.collapseCurrent(name, st, cur)
-		st.LastSeen = now.Unix()
-		m.logHistory(now, m.jobHistory(name, st))
-		return nil
-	}
-
-	if st.LastBuild == cur.Number {
-		// No new build; nothing to announce.
-		m.logHistory(now, m.jobHistory(name, st))
+		m.logHistory(st.toHistory(name))
 		return nil
 	}
 
@@ -224,8 +244,7 @@ func (m *Monitor) pollJob(name string, now time.Time) error {
 		m.logger.Warn("large build gap, collapsing onto latest",
 			"job", name, "gap", cur.Number-st.LastBuild)
 		m.collapseCurrent(name, st, cur)
-		st.LastSeen = now.Unix()
-		m.logHistory(now, m.jobHistory(name, st))
+		m.logHistory(st.toHistory(name))
 		return nil
 	}
 
@@ -241,8 +260,7 @@ func (m *Monitor) pollJob(name string, now time.Time) error {
 		m.processBuild(name, st, b)
 	}
 	st.LastBuild = cur.Number
-	st.LastSeen = now.Unix()
-	m.logHistory(now, m.jobHistory(name, st))
+	m.logHistory(st.toHistory(name))
 	return nil
 }
 
@@ -250,13 +268,9 @@ func (m *Monitor) pollJob(name string, now time.Time) error {
 // announce a failure once with an estimated consecutive count, otherwise
 // just adopt the state.  Missed intermediate builds are not announced.
 func (m *Monitor) collapseCurrent(job string, st *jobState, cur *jenkinsBuild) {
-	consecutive := 1
-	if st.State == stateFailed {
-		consecutive = st.Consecutive + 1
-	}
 	switch cur.Result {
 	case "FAILURE", "UNSTABLE":
-		st.Consecutive = consecutive
+		st.Consecutive++
 		st.State = stateFailed
 		st.Announced = cur.Number
 		m.announce(m.failText(job, cur, st.Consecutive))
@@ -301,7 +315,8 @@ func (m *Monitor) processBuild(job string, st *jobState, b *jenkinsBuild) {
 }
 
 // pollNodes announces node offline/online transitions.
-func (m *Monitor) pollNodes(now time.Time) error {
+func (m *Monitor) pollNodes() error {
+	now := time.Now()
 	computers, err := m.jenkins.computers()
 	if err != nil {
 		return err
@@ -324,7 +339,7 @@ func (m *Monitor) pollNodes(now time.Time) error {
 				m.announce(m.nodeText(n.DisplayName, true, n.OfflineCauseReason))
 				m.logger.Info("node offline announced", "node", n.DisplayName,
 					"reason", n.OfflineCauseReason)
-				m.logNodeHistory(now, n.DisplayName, n.Offline, n.OfflineCauseReason)
+				m.logHistory(st.toHistory(n.DisplayName))
 			}
 		case st.Offline && !n.Offline:
 			st.Offline = false
@@ -332,7 +347,7 @@ func (m *Monitor) pollNodes(now time.Time) error {
 			st.Seen = now.Unix()
 			m.announce(m.nodeText(n.DisplayName, false, ""))
 			m.logger.Info("node online announced", "node", n.DisplayName)
-			m.logNodeHistory(now, n.DisplayName, false, "")
+			m.logHistory(st.toHistory(n.DisplayName))
 		case !st.Offline && n.Offline:
 			st.Offline = true
 			st.Reason = n.OfflineCauseReason
@@ -340,7 +355,7 @@ func (m *Monitor) pollNodes(now time.Time) error {
 			m.announce(m.nodeText(n.DisplayName, true, n.OfflineCauseReason))
 			m.logger.Info("node offline announced", "node", n.DisplayName,
 				"reason", n.OfflineCauseReason)
-			m.logNodeHistory(now, n.DisplayName, true, n.OfflineCauseReason)
+			m.logHistory(st.toHistory(n.DisplayName))
 		default:
 			st.Seen = now.Unix() // unchanged; no announcement
 		}
@@ -357,17 +372,14 @@ func (m *Monitor) pollNodes(now time.Time) error {
 }
 
 func (m *Monitor) announce(text string) {
+	msg := fmt.Sprintf("[%s] %s", m.cfg.Name, text)
+	m.logger.Debug("announce message", "msg", msg)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := m.poster.Post(ctx, text); err != nil {
-		m.logger.Error("announce failed", "error", err)
+	if err := m.poster.Post(ctx, msg); err != nil {
+		m.logger.Error("announce failed", "msg", msg, "error", err)
 	}
-}
-
-// Message formatting.  The config Name prefixes the messages to identify
-// the Jenkins instance in a shared channel.
-func (m *Monitor) prefix(msg string) string {
-	return fmt.Sprintf("[%s] %s", m.cfg.Name, msg)
 }
 
 func (m *Monitor) failText(job string, b *jenkinsBuild, consecutive int) string {
@@ -379,22 +391,25 @@ func (m *Monitor) failText(job string, b *jenkinsBuild, consecutive int) string 
 		text += fmt.Sprintf(" (%d consecutive failures)", consecutive)
 	}
 	text += " " + b.URL
-	return m.prefix(strings.TrimSpace(text))
+	return strings.TrimSpace(text)
 }
 
 func (m *Monitor) recoverText(job string, b *jenkinsBuild, after int) string {
-	return m.prefix(fmt.Sprintf("%s RECOVERED: build #%d SUCCESS after %d failed builds %s",
-		job, b.Number, after, b.URL))
+	return fmt.Sprintf("%s RECOVERED: build #%d SUCCESS after %d failed builds %s",
+		job, b.Number, after, b.URL)
 }
 
 func (m *Monitor) nodeText(name string, offline bool, reason string) string {
+	text := fmt.Sprintf("executor `%s` ", name)
 	if offline {
+		text += "OFFLINE"
 		if reason != "" {
-			return m.prefix(fmt.Sprintf("executor %s OFFLINE: %s", name, reason))
+			text += ": " + reason
 		}
-		return m.prefix(fmt.Sprintf("executor %s OFFLINE", name))
+	} else {
+		text += "back ONLINE"
 	}
-	return m.prefix(fmt.Sprintf("executor %s back ONLINE", name))
+	return text
 }
 
 // Persistence: state (JSON, atomic) and history (JSONL).
@@ -435,19 +450,10 @@ func (m *Monitor) saveState() {
 	m.logger.Debug("state saved", "path", m.statePath)
 }
 
-func (m *Monitor) jobHistory(name string, st *jobState) historyLine {
-	return historyLine{Type: "job", Name: name,
-		State: st.State, Result: st.LastResult, Build: st.LastBuild, URL: st.LastURL}
-}
-
 // logHistory buffers one history line of the current poll round.
-func (m *Monitor) logHistory(t time.Time, h historyLine) {
-	h.Timestamp = t.UTC()
+func (m *Monitor) logHistory(h *historyLine) {
+	h.Timestamp = time.Now().UTC()
 	if err := m.history.Append(h); err != nil {
 		m.logger.Error("history append failure", "error", err)
 	}
-}
-
-func (m *Monitor) logNodeHistory(t time.Time, name string, offline bool, reason string) {
-	m.logHistory(t, historyLine{Type: "node", Name: name, Offline: &offline, Reason: reason})
 }

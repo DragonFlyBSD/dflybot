@@ -2,7 +2,7 @@
 //
 // Jenkins REST API client (read-only).
 //
-// Co-authored-by: Deepseek-v4-flash (wit Pi Coding Agent)
+// Co-authored-by: DeepSeek-v4-flash (with Pi Coding Agent)
 //
 
 package main

@@ -3,7 +3,7 @@
 // Jenkins CI monitor that reports build failures, recoveries, and node
 // offline/online changes to IRC via dflybot's webhook.
 //
-// Co-authored-by: Deepseek-v4-flash (wit Pi Coding Agent)
+// Co-authored-by: DeepSeek-v4-flash (with Pi Coding Agent)
 //
 
 package main

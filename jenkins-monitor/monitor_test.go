@@ -3,7 +3,7 @@
 // Unit tests for the Jenkins REST client and the monitor, using a stub
 // Jenkins HTTP server (no real Jenkins involved).
 //
-// Co-authored-by: Deepseek-v4-flash (wit Pi Coding Agent)
+// Co-authored-by: DeepSeek-v4-flash (with Pi Coding Agent)
 //
 
 package main
@@ -273,7 +273,7 @@ func TestMonitorNodeTransitions(t *testing.T) {
 	stub.setComputers([]stubComputer{{DisplayName: "Built-In Node", Offline: true,
 		OfflineCauseReason: "crashed"}})
 	m.poll()
-	if got := poster.messages(); len(got) != 1 || !strings.Contains(got[0], "Built-In Node OFFLINE: crashed") {
+	if got := poster.messages(); len(got) != 1 || !strings.Contains(got[0], "`Built-In Node` OFFLINE: crashed") {
 		t.Fatalf("offline messages = %v", got)
 	}
 	m.poll() // still offline; silent
@@ -299,7 +299,7 @@ func TestMonitorNodeStartupOffline(t *testing.T) {
 	m, _ := newTestMonitor(t, fakeCfg(ts), poster)
 	m.poll()
 	msgs := poster.messages()
-	if len(msgs) != 1 || !strings.Contains(msgs[0], "Build1 OFFLINE: down") {
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "`Build1` OFFLINE: down") {
 		t.Fatalf("startup offline messages = %v", msgs)
 	}
 }
