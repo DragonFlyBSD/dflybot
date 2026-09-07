@@ -109,11 +109,23 @@ func newGitHubClient(token string) *githubClient {
 	}
 }
 
-// fetchEvents polls the repository events newer than the sinceID watermark.
-// It returns the events (newest first), the new ETag, and whether the list
-// changed (false on a 304 Not Modified reply).  The watermark is used both
-// to stop paging early and by the caller to deduplicate.
-func (c *githubClient) fetchEvents(project, repo, etag string, sinceID eventID) ([]ghEvent, string, bool, error) {
+// Time returns the event's creation time (UTC); zero when unparsable.
+func (e *ghEvent) Time() time.Time {
+	t, err := time.Parse(time.RFC3339, e.CreatedAt)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// fetchEvents polls the repository events newer than the sinceAt watermark
+// (by event creation time).  It returns the events (newest first), the new
+// ETag, and whether the list changed (false on a 304 Not Modified reply).
+// The watermark is used both to stop paging early and by the caller to
+// deduplicate.  Event ids are NOT used for ordering: GitHub assigns them
+// from separate pools for web-originated (issues/PRs/comments) and
+// commit-originated (push/delete/create) events.
+func (c *githubClient) fetchEvents(project, repo, etag string, sinceAt time.Time) ([]ghEvent, string, bool, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/events?per_page=%d", c.baseURL, project, repo, pageSize)
 	var events []ghEvent
 	newEtag := ""
@@ -134,11 +146,12 @@ func (c *githubClient) fetchEvents(project, repo, etag string, sinceID eventID) 
 		}
 		events = append(events, got.events...)
 		// Stop paging once an event not newer than the watermark is reached
-		// (pages are newest first, so older pages cannot help).
+		// (pages are newest first by creation time, so older pages cannot
+		// help).
 		if next == "" {
 			break
 		}
-		if n := len(got.events); n > 0 && got.events[n-1].ID <= sinceID {
+		if n := len(got.events); n > 0 && !got.events[n-1].Time().After(sinceAt) {
 			break
 		}
 		url = next

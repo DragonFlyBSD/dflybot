@@ -46,6 +46,25 @@ func openEvent(id string) string {
 	return eventJSON("IssuesEvent", id, "opened")
 }
 
+// openEventAt builds an "opened issue" event with a given creation time.
+func openEventAt(id, at string) string {
+	return eventJSONAt("IssuesEvent", id, "opened", at)
+}
+
+// commentAt builds an issue-comment event (small web-origin id pool).
+func commentAt(id, at string) string {
+	return fmt.Sprintf(`{"id":%q,"type":"IssueCommentEvent","created_at":%q,
+		"actor":{"login":"zoe"},"payload":{"action":"created","issue":{
+		"number":12,"title":"fix foo","html_url":"https://github.com/o/r/issues/12",
+		"state":"open","user":{"login":"bob"}},"comment":{"body":"looks good"}}}`, id, at)
+}
+
+// deleteAt builds a repository DeleteEvent (large commit-origin id pool).
+func deleteAt(id, at string) string {
+	return fmt.Sprintf(`{"id":%q,"type":"DeleteEvent","created_at":%q,
+		"actor":{"login":"bot"},"payload":{}}`, id, at)
+}
+
 // eventsStub is a stateful fake of the repository events endpoint: it
 // honours If-None-Match/ETag and serves a fixed newest-first event list.
 type eventsStub struct {
@@ -112,8 +131,12 @@ func readState(t *testing.T, dir string) repoState {
 // ---- tests ----
 
 func TestMonitorSeedThenAnnounce(t *testing.T) {
+	const (
+		t0 = "2026-09-06T10:00:00Z"
+		t1 = "2026-09-06T10:01:00Z"
+	)
 	stub := &eventsStub{}
-	stub.setEvents(`"e1"`, []string{openEvent("3"), openEvent("2"), openEvent("1")})
+	stub.setEvents(`"e1"`, []string{openEventAt("3", t0), openEventAt("2", t0), openEventAt("1", t0)})
 	ts := httptest.NewServer(stub.handler())
 	defer ts.Close()
 
@@ -124,8 +147,8 @@ func TestMonitorSeedThenAnnounce(t *testing.T) {
 	if got := poster.messages(); len(got) != 0 {
 		t.Fatalf("seed announced: %v", got)
 	}
-	if st := readState(t, dir); st.LastEventID != 3 {
-		t.Fatalf("watermark = %d, want 3", st.LastEventID)
+	if st := readState(t, dir); st.LastEventAt != t0 {
+		t.Fatalf("watermark = %q, want %q", st.LastEventAt, t0)
 	}
 
 	// No new events (304): nothing announced.
@@ -135,15 +158,15 @@ func TestMonitorSeedThenAnnounce(t *testing.T) {
 	}
 
 	// New events: announced and recorded in the history.
-	stub.setEvents(`"e2"`, []string{openEvent("5"), openEvent("4")})
+	stub.setEvents(`"e2"`, []string{openEventAt("5", t1), openEventAt("4", t1)})
 	m.poll()
 	msgs := poster.messages()
 	if len(msgs) != 1 || !strings.Contains(msgs[0], "[o/r] ") ||
 		!strings.Contains(msgs[0], "issue #12 (fix foo) opened by aly") {
 		t.Fatalf("messages = %v", msgs)
 	}
-	if st := readState(t, dir); st.LastEventID != 5 {
-		t.Errorf("watermark = %d, want 5", st.LastEventID)
+	if st := readState(t, dir); st.LastEventAt != t1 {
+		t.Errorf("watermark = %q, want %q", st.LastEventAt, t1)
 	}
 	hist, err := os.ReadFile(filepath.Join(dir, "o", "r.history"))
 	if err != nil {
@@ -151,6 +174,132 @@ func TestMonitorSeedThenAnnounce(t *testing.T) {
 	}
 	if lines := strings.Count(strings.TrimSpace(string(hist)), "\n") + 1; lines != 2 {
 		t.Errorf("history lines = %d, want 2", lines)
+	}
+}
+
+// TestMonitorMixedIDPools is the regression test for GitHub's two event id
+// pools: a large commit-origin id (DeleteEvent) must never shadow later
+// web-origin events (issue comments) that carry smaller ids.
+func TestMonitorMixedIDPools(t *testing.T) {
+	const (
+		t0 = "2026-09-06T10:00:00Z"
+		t1 = "2026-09-06T10:01:00Z"
+		t2 = "2026-09-06T10:02:00Z"
+	)
+	stub := &eventsStub{}
+	stub.setEvents(`"e0"`, []string{commentAt("14550000001", t0)})
+	ts := httptest.NewServer(stub.handler())
+	defer ts.Close()
+
+	poster := &recordPoster{}
+	m, _ := newTestMonitor(t, ts, defaultRepo(), poster)
+	m.poll() // seed silently
+
+	// A DeleteEvent with a much larger id arrives together with a comment.
+	stub.setEvents(`"e1"`, []string{deleteAt("20309194091", t1), commentAt("14550033122", t1)})
+	m.poll()
+	if got := poster.messages(); len(got) != 1 ||
+		!strings.Contains(got[0], "commented on issue #12") {
+		t.Fatalf("after delete+comment: %v", got)
+	}
+
+	// Later comments carry smaller ids than the DeleteEvent: they must still
+	// be announced (watermark is time-based, not id-based).
+	stub.setEvents(`"e2"`, []string{commentAt("14553206432", t2), commentAt("14551077752", t2)})
+	m.poll()
+	msgs := poster.messages()
+	if len(msgs) != 2 {
+		t.Fatalf("total messages = %d, want 2: %v", len(msgs), msgs)
+	}
+}
+
+// TestMonitorEmptyRepoSeedsState covers a repo with no events: the state
+// file must be (re)written as version 2 even when the events feed is empty,
+// and the first real event that later appears must be announced (not
+// consumed as a silent seed).
+func TestMonitorEmptyRepoSeedsState(t *testing.T) {
+	stub := &eventsStub{}
+	stub.setEvents(`"e-new"`, nil) // no events
+	ts := httptest.NewServer(stub.handler())
+	defer ts.Close()
+
+	poster := &recordPoster{}
+	cfg := defaultRepo()
+	client := newGitHubClient("")
+	client.baseURL = ts.URL
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "o"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A stale v1 state file from the previous (id-watermark) format.
+	oldState := `{"version":1,"etag":"\"old\"","last_event_id":0,"updated_at":123}`
+	if err := os.WriteFile(filepath.Join(dir, "o", "r.state"), []byte(oldState), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewRepoMonitor(cfg, client, poster, dir, nil)
+	m.loadState() // rejects the v1 file
+
+	// First poll on the empty repo: seeds and rewrites the state as v2.
+	m.poll()
+	if got := poster.messages(); len(got) != 0 {
+		t.Fatalf("empty-repo poll announced: %v", got)
+	}
+	var st repoState
+	exists, err := monitor.ReadJSON(filepath.Join(dir, "o", "r.state"), &st)
+	if err != nil || !exists {
+		t.Fatalf("state read: exists=%v err=%v", exists, err)
+	}
+	if st.Version != stateVersion {
+		t.Fatalf("state version = %d, want %d", st.Version, stateVersion)
+	}
+	if st.ETag != `"e-new"` || st.LastEventAt != "" {
+		t.Errorf("seeded-empty state = %+v", st)
+	}
+
+	// No changes: 304, nothing announced.
+	m.poll()
+	if got := poster.messages(); len(got) != 0 {
+		t.Fatalf("unchanged empty poll announced: %v", got)
+	}
+
+	// The first real event appears: it must be announced once.
+	stub.setEvents(`"e2"`, []string{openEventAt("500", "2026-09-06T11:00:00Z")})
+	m.poll()
+	if got := poster.messages(); len(got) != 1 || !strings.Contains(got[0], "opened by") {
+		t.Fatalf("first event messages = %v", got)
+	}
+	// And it must not be re-announced on a repeated poll.
+	m.poll()
+	if got := poster.messages(); len(got) != 1 {
+		t.Fatalf("first event re-announced: %v", got)
+	}
+}
+
+// TestMonitorSameSecondBoundary ensures two events sharing the watermark
+// second are both announced, and not re-announced when redelivered.
+func TestMonitorSameSecondBoundary(t *testing.T) {
+	stub := &eventsStub{}
+	const sameT = "2026-09-06T10:00:00Z"
+	stub.setEvents(`"e0"`, []string{openEventAt("100", sameT)})
+	ts := httptest.NewServer(stub.handler())
+	defer ts.Close()
+
+	poster := &recordPoster{}
+	m, _ := newTestMonitor(t, ts, defaultRepo(), poster)
+	m.poll() // seed at sameT, boundary = {100}
+
+	// A new event in the same second arrives with a changed etag.
+	stub.setEvents(`"e1"`, []string{openEventAt("101", sameT), openEventAt("100", sameT)})
+	m.poll()
+	if got := poster.messages(); len(got) != 1 {
+		t.Fatalf("same-second poll = %v", got)
+	}
+	// Redelivery of the same second's events must not re-announce.
+	stub.setEvents(`"e2"`, []string{openEventAt("101", sameT), openEventAt("100", sameT)})
+	m.poll()
+	if got := poster.messages(); len(got) != 1 {
+		t.Fatalf("redelivered same-second events re-announced: %v", got)
 	}
 }
 

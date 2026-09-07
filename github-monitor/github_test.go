@@ -13,9 +13,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func eventJSON(typ, id string, action string) string {
+	return eventJSONAt(typ, id, action, "2026-09-06T12:00:00Z")
+}
+
+func eventJSONAt(typ, id, action, created string) string {
 	// Minimal event JSON for the various types; ids exercised as strings.
 	issue := `{"number":12,"title":"fix foo","html_url":"https://github.com/o/r/issues/12",
 		"state":"open","user":{"login":"bob"}}`
@@ -33,7 +38,7 @@ func eventJSON(typ, id string, action string) string {
 	if payload == "" {
 		return ""
 	}
-	return `{"id":"` + id + `","type":"` + typ + `","created_at":"2026-09-06T12:00:00Z",
+	return `{"id":"` + id + `","type":"` + typ + `","created_at":"` + created + `",
 		"actor":{"login":"aly"},"payload":{` + payload + `}}`
 }
 
@@ -148,12 +153,12 @@ func TestFetchEventsAndETag(t *testing.T) {
 
 	c := newGitHubClient("tok")
 	c.baseURL = ts.URL
-	events, _, modified, err := c.fetchEvents("o", "r", "", 0)
+	events, _, modified, err := c.fetchEvents("o", "r", "", time.Time{})
 	if err != nil || !modified || len(events) != 1 || int64(events[0].ID) != 100 {
 		t.Fatalf("first fetch = %d events, modified=%v, err=%v", len(events), modified, err)
 	}
 	// Second fetch with the etag: 304, nothing new.
-	events2, etag2, modified2, err := c.fetchEvents("o", "r", `"abc"`, 100)
+	events2, etag2, modified2, err := c.fetchEvents("o", "r", `"abc"`, time.Time{})
 	if err != nil || modified2 || len(events2) != 0 || etag2 == "" {
 		t.Fatalf("304 fetch = %v events, modified=%v, etag=%q, err=%v", len(events2), modified2, etag2, err)
 	}
@@ -182,7 +187,7 @@ func TestFetchEventsPaging(t *testing.T) {
 
 	c := newGitHubClient("")
 	c.baseURL = ts.URL
-	events, _, _, err := c.fetchEvents("o", "r", "", 0)
+	events, _, _, err := c.fetchEvents("o", "r", "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,20 +197,32 @@ func TestFetchEventsPaging(t *testing.T) {
 }
 
 func TestFetchEventsStopsAtWatermark(t *testing.T) {
-	p1 := "[" + eventJSON("IssuesEvent", "300", "opened") + "]"
+	// Page 1 has a link to page 2, but its only event is already older than
+	// the watermark: page 2 must not be fetched.
+	p1 := "[" + eventJSONAt("IssuesEvent", "300", "opened", "2026-09-06T10:00:00Z") + "]"
+	page2 := false
+	var nextURL string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.RawQuery, "page=2") {
-			t.Error("should not fetch page 2 past the watermark")
-		}
 		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.RawQuery, "page=2") {
+			page2 = true
+			w.Write([]byte("[]"))
+			return
+		}
+		w.Header().Set("Link", `<`+nextURL+`>; rel="next"`)
 		w.Write([]byte(p1))
 	}))
 	defer ts.Close()
+	nextURL = ts.URL + "/x?per_page=100&page=2"
 
 	c := newGitHubClient("")
 	c.baseURL = ts.URL
-	events, _, _, err := c.fetchEvents("o", "r", "", eventID(200))
+	since := time.Date(2026, 9, 6, 10, 0, 1, 0, time.UTC) // later than the event
+	events, _, _, err := c.fetchEvents("o", "r", "", since)
 	if err != nil || len(events) != 1 {
 		t.Fatalf("events=%v err=%v", len(events), err)
+	}
+	if page2 {
+		t.Error("should not fetch page 2 past the watermark")
 	}
 }

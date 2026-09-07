@@ -23,9 +23,12 @@ import (
 )
 
 const (
-	stateVersion = 1
-	titleMax     = 100 // runes
-	commentMax   = 120 // runes
+	// Version 2: the watermark is the newest processed event's creation
+	// time (event ids are not ordered across GitHub's id pools).
+	stateVersion = 2
+
+	titleMax   = 100 // runes
+	commentMax = 120 // runes
 
 	activityIssue = "issue"
 	activityPR    = "PR"
@@ -112,11 +115,45 @@ func (a *activity) history() ghHistoryLine {
 }
 
 // repoState is the on-disk state of one repo.
+//
+// GitHub event ids are not ordered (separate id pools for web-originated
+// and commit-originated events), so the watermark is the creation time of
+// the newest processed event.  Since times have second granularity,
+// last_event_ids records the ids already processed at exactly that time to
+// deduplicate same-second events across polls.
 type repoState struct {
-	Version     int    `json:"version"`
-	ETag        string `json:"etag,omitempty"`
-	LastEventID int64  `json:"last_event_id"`
-	UpdatedAt   int64  `json:"updated_at"`
+	Version      int     `json:"version"`
+	ETag         string  `json:"etag,omitempty"`
+	LastEventAt  string  `json:"last_event_at,omitempty"` // RFC3339 (UTC)
+	LastEventIDs []int64 `json:"last_event_ids,omitempty"`
+	UpdatedAt    int64   `json:"updated_at"`
+}
+
+// lastAt parses the watermark time; the zero time means not seeded.
+func (st *repoState) lastAt() time.Time {
+	t, err := time.Parse(time.RFC3339, st.LastEventAt)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// seenAtBoundary reports whether the event id was already processed at the
+// watermark's exact second.
+func (st *repoState) seenAtBoundary(id int64) bool {
+	for _, v := range st.LastEventIDs {
+		if v == id {
+			return true
+		}
+	}
+	return false
+}
+
+// setLast records the new watermark (the creation time of the newest
+// processed event) and the ids processed at exactly that time.
+func (st *repoState) setLast(at time.Time, ids []int64) {
+	st.LastEventAt = at.UTC().Format(time.RFC3339)
+	st.LastEventIDs = ids
 }
 
 type RepoMonitor struct {
@@ -167,7 +204,7 @@ func (m *RepoMonitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 
 	m.loadState()
 	m.logger.Info("github repo monitor started",
-		"interval", m.cfg.Interval, "last_event_id", m.state.LastEventID)
+		"interval", m.cfg.Interval, "last_event_at", m.state.LastEventAt)
 
 	monitor.Loop(ctx, time.Duration(m.cfg.Interval)*time.Second, m.poll)
 	m.logger.Debug("repo monitor exiting")
@@ -177,7 +214,7 @@ func (m *RepoMonitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 func (m *RepoMonitor) poll() {
 	now := time.Now()
 	events, etag, modified, err := m.github.fetchEvents(
-		m.cfg.Project, m.cfg.Repo, m.state.ETag, eventID(m.state.LastEventID))
+		m.cfg.Project, m.cfg.Repo, m.state.ETag, m.state.lastAt())
 	if err != nil {
 		m.logger.Warn("events fetch failed", "error", err)
 		return // retry next poll; keep the previous state
@@ -188,34 +225,89 @@ func (m *RepoMonitor) poll() {
 	}
 
 	// First run: seed the watermark silently (no announcements).  The etag
-	// (always present on a successful reply) tells the first run apart from
-	// a restarted monitor whose watermark happens to still be 0.
-	if m.state.LastEventID == 0 && m.state.ETag == "" {
-		m.state.ETag = etag
-		m.state.UpdatedAt = now.Unix()
-		for _, e := range events {
-			if int64(e.ID) > m.state.LastEventID {
-				m.state.LastEventID = int64(e.ID)
+	// distinguishes a never-seeded state from one seeded while the repo had
+	// no events yet: in the latter case the first events that later appear
+	// must be announced, not consumed as backlog.
+	if m.state.LastEventAt == "" && m.state.ETag == "" {
+		if len(events) == 0 {
+			// A repo may have no events at all: persist the seeded (empty)
+			// state so that stale state files are rewritten and later
+			// polls short-circuit via 304/ETag.
+			m.state.ETag = etag
+			m.state.UpdatedAt = now.Unix()
+			m.saveState()
+			m.logger.Debug("seeded empty repo (no events)")
+			return
+		}
+		maxT := events[0].Time()
+		for _, e := range events[1:] {
+			if t := e.Time(); t.After(maxT) {
+				maxT = t
 			}
 		}
+		var ids []int64
+		for _, e := range events {
+			if e.Time().Equal(maxT) {
+				ids = append(ids, int64(e.ID))
+			}
+		}
+		m.state.setLast(maxT, ids)
+		m.state.ETag = etag
+		m.state.UpdatedAt = now.Unix()
 		m.saveState()
-		m.logger.Info("seeded watermark", "last_event_id", m.state.LastEventID)
+		m.logger.Info("seeded watermark", "last_event_at", m.state.LastEventAt)
 		return
 	}
 
-	// Collect the new interesting events in chronological order.
-	var acts []activity
+	// Collect the events that are genuinely new: newer than the watermark,
+	// or sharing its second without having been processed before.  The list
+	// is scanned oldest-first so the announcements are chronological.
+	cur := m.state.lastAt()
+	var accepted []ghEvent
 	for i := len(events) - 1; i >= 0; i-- {
-		e := &events[i]
-		if int64(e.ID) <= m.state.LastEventID {
-			continue
+		e := events[i]
+		t := e.Time()
+		if t.After(cur) || (t.Equal(cur) && !m.state.seenAtBoundary(int64(e.ID))) {
+			accepted = append(accepted, e)
 		}
-		if a, ok := m.classify(e); ok {
+	}
+	if len(accepted) == 0 {
+		m.state.ETag = etag
+		m.state.UpdatedAt = now.Unix()
+		m.saveState()
+		return
+	}
+
+	// Classify the accepted events into announcements.
+	idTime := make(map[int64]time.Time, len(accepted))
+	var acts []activity
+	for _, e := range accepted {
+		idTime[int64(e.ID)] = e.Time()
+		if a, ok := m.classify(&e); ok {
 			acts = append(acts, *a)
 		}
 	}
-	// Advance the watermark past everything the API returned.
-	m.state.LastEventID = int64(events[0].ID)
+
+	// Advance the watermark to the newest accepted event (creation time) and
+	// record the ids at exactly that time.  When the watermark second does
+	// not advance, keep the previously recorded ids too: events from that
+	// second reappear in later lists and must not be re-announced.
+	maxT := accepted[0].Time()
+	for _, e := range accepted[1:] {
+		if t := e.Time(); t.After(maxT) {
+			maxT = t
+		}
+	}
+	var boundary []int64
+	if maxT.Equal(cur) {
+		boundary = append(boundary, m.state.LastEventIDs...)
+	}
+	for _, e := range accepted {
+		if e.Time().Equal(maxT) {
+			boundary = append(boundary, int64(e.ID))
+		}
+	}
+	m.state.setLast(maxT, boundary)
 	m.state.ETag = etag
 	m.state.UpdatedAt = now.Unix()
 
@@ -224,7 +316,7 @@ func (m *RepoMonitor) poll() {
 		m.announce(acts)
 		for i := range acts {
 			h := acts[i].history()
-			h.Timestamp = now.UTC()
+			h.Timestamp = idTime[acts[i].eventID].UTC()
 			h.ID = acts[i].eventID
 			if err := m.history.Append(h); err != nil {
 				m.logger.Error("history append failure", "error", err)
@@ -297,7 +389,8 @@ func (m *RepoMonitor) classify(e *ghEvent) (*activity, bool) {
 		}
 	case "IssueCommentEvent":
 		ref := e.Payload.Issue
-		if ref == nil || e.Payload.Comment == nil {
+		comment := e.Payload.Comment
+		if ref == nil || comment == nil {
 			return nil, false
 		}
 		kind := activityIssue
@@ -309,7 +402,7 @@ func (m *RepoMonitor) classify(e *ghEvent) (*activity, bool) {
 			action:  "comment",
 			number:  ref.Number,
 			actor:   e.Actor.Login,
-			title:   snippet(e.Payload.Comment.Body, commentMax),
+			title:   snippet(comment.Body, commentMax),
 			url:     ref.HtmlUrl,
 			eventID: int64(e.ID),
 		}
