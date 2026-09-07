@@ -146,6 +146,7 @@ func NewRepoMonitor(cfg *ConfigRepo, gh *githubClient, poster monitor.Poster,
 		statePath:   filepath.Join(dataDir, cfg.Project, cfg.Repo+".state"),
 		historyPath: filepath.Join(dataDir, cfg.Project, cfg.Repo+".history"),
 		history:     monitor.NewHistory(filepath.Join(dataDir, cfg.Project, cfg.Repo+".history")),
+		state:       repoState{Version: stateVersion},
 	}
 }
 
@@ -181,6 +182,7 @@ func (m *RepoMonitor) poll() {
 		m.logger.Warn("events fetch failed", "error", err)
 		return // retry next poll; keep the previous state
 	}
+	m.logger.Debug("events fetched", "count", len(events), "etag", etag, "modified", modified)
 	if !modified {
 		return // nothing changed (304); state stays as-is
 	}
@@ -217,6 +219,7 @@ func (m *RepoMonitor) poll() {
 	m.state.ETag = etag
 	m.state.UpdatedAt = now.Unix()
 
+	m.logger.Debug("activities classified", "count", len(acts))
 	if len(acts) > 0 {
 		m.announce(acts)
 		for i := range acts {

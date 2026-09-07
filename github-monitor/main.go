@@ -110,12 +110,13 @@ func main() {
 	webhook := monitor.NewWebhook(&config.Webhook)
 	wg := &sync.WaitGroup{}
 
-	for _, repo := range config.Repos {
+	for i := range config.Repos {
+		repo := &config.Repos[i]
 		if !repo.Enabled {
 			slog.Info("skip disabled repo", "project", repo.Project, "repo", repo.Repo)
 			continue
 		}
-		mon := NewRepoMonitor(&repo, github, webhook, config.DataDir, nil)
+		mon := NewRepoMonitor(repo, github, webhook, config.DataDir, nil)
 		wg.Add(1)
 		go mon.Start(ctx, wg)
 	}
