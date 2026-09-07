@@ -2,7 +2,7 @@
 //
 // Tests for the shared monitor package.
 //
-// Co-authored-by: DeepSeek-v4-flash (wit Pi Coding Agent)
+// Co-authored-by: DeepSeek-v4-flash (with Pi Coding Agent)
 //
 
 package monitor

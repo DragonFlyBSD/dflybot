@@ -2,7 +2,7 @@
 //
 // Unit tests for the Jenkins REST client request building and auth.
 //
-// Co-authored-by: Deepseek-v4-flash (wit Pi Coding Agent)
+// Co-authored-by: DeepSeek-v4-flash (with Pi Coding Agent)
 //
 
 package main

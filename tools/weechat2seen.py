@@ -25,7 +25,7 @@
 # By default the log timestamps are interpreted in the local time zone of
 # this machine (WeeChat default); pass --utc if they were recorded in UTC.
 #
-# Co-authored-by: Deepseek-v4-flash (wit Pi Coding Agent)
+# Co-authored-by: DeepSeek-v4-flash (with Pi Coding Agent)
 
 import argparse
 import json

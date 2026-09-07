@@ -8,7 +8,7 @@
 // One JSON object per line (JSONL) so the logs are easy to consume and
 // analyze with other tools, e.g. for browsing and searching.
 //
-// Co-authored-by: Deepseek-v4-flash (wit Pi Coding Agent)
+// Co-authored-by: DeepSeek-v4-flash (with Pi Coding Agent)
 //
 
 package main

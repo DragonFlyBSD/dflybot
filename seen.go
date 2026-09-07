@@ -5,7 +5,7 @@
 // The state is loaded on startup, kept in memory, periodically flushed to
 // disk, and saved again on shutdown.
 //
-// Co-authored-by: Deepseek-v4-flash (wit Pi Coding Agent)
+// Co-authored-by: DeepSeek-v4-flash (with Pi Coding Agent)
 //
 
 package main

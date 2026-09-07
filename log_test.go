@@ -4,7 +4,7 @@
 // tested directly, and the record-extraction conventions are checked against
 // goirc's ParseLine (pure line parsing; no IRC server involved).
 //
-// Co-authored-by: Deepseek-v4-flash (wit Pi Coding Agent)
+// Co-authored-by: DeepSeek-v4-flash (with Pi Coding Agent)
 //
 
 package main
