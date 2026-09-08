@@ -57,31 +57,31 @@ func TestHysteresis(t *testing.T) {
 	mon := newStateMon(2, 2)
 	poster := mon.poster.(*recordPoster)
 
-	if msg := mon.updateState(&probeResult{ok: true}); msg != "" {
+	if msg := mon.updateState(&probeResult{ok: true}, time.Now()); msg != "" {
 		t.Fatalf("startup ok announced: %s", msg)
 	}
 	// One failure is not enough.
-	if msg := mon.updateState(&probeResult{ok: false, reason: "timeout"}); msg != "" {
+	if msg := mon.updateState(&probeResult{ok: false, reason: "timeout"}, time.Now()); msg != "" {
 		t.Fatalf("first failure announced: %s", msg)
 	}
 	if mon.state.State != stateUp {
 		t.Fatalf("state = %q, want up", mon.state.State)
 	}
 	// Second consecutive failure declares down.
-	if msg := mon.updateState(&probeResult{ok: false, reason: "timeout"}); msg == "" ||
+	if msg := mon.updateState(&probeResult{ok: false, reason: "timeout"}, time.Now()); msg == "" ||
 		!strings.Contains(msg, "DOWN: https://example.com/") {
 		t.Fatalf("down messages = %s", msg)
 	}
 	// Still failing: no re-announcement.
-	if msg := mon.updateState(&probeResult{ok: false, reason: "timeout"}); msg != "" {
+	if msg := mon.updateState(&probeResult{ok: false, reason: "timeout"}, time.Now()); msg != "" {
 		t.Fatalf("continued failure announced: %s", msg)
 	}
 	// One success is not enough to recover.
-	if msg := mon.updateState(&probeResult{ok: true, status: 200}); msg != "" {
+	if msg := mon.updateState(&probeResult{ok: true, status: 200}, time.Now()); msg != "" {
 		t.Fatalf("first success announced: %s", msg)
 	}
 	// Second consecutive success recovers.
-	if msg := mon.updateState(&probeResult{ok: true, status: 200}); msg == "" ||
+	if msg := mon.updateState(&probeResult{ok: true, status: 200}, time.Now()); msg == "" ||
 		!strings.Contains(msg, "UP:") {
 		t.Fatalf("up messages = %s", msg)
 	}
@@ -91,11 +91,51 @@ func TestHysteresis(t *testing.T) {
 	_ = poster
 }
 
+func TestRecoveryReportsDowntime(t *testing.T) {
+	mon := newStateMon(1, 1)
+	t1 := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	// Down after the first failure (down_repeats = 1).
+	if msg := mon.updateState(&probeResult{ok: false, reason: "refused"}, t1); msg == "" {
+		t.Fatal("no down message")
+	}
+	if mon.state.DownSince != t1.Unix() {
+		t.Fatalf("DownSince = %d, want %d", mon.state.DownSince, t1.Unix())
+	}
+	// Recovery reports the total downtime and resets DownSince.
+	t2 := t1.Add(90 * time.Second)
+	msg := mon.updateState(&probeResult{ok: true, status: 200}, t2)
+	if !strings.Contains(msg, "UP: https://example.com/ recovered (down 1m30s)") {
+		t.Fatalf("recovery message = %q", msg)
+	}
+	if mon.state.DownSince != 0 {
+		t.Errorf("DownSince not reset: %d", mon.state.DownSince)
+	}
+}
+
+func TestFmtDowntime(t *testing.T) {
+	tests := []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "0s"},
+		{45 * time.Second, "45s"},
+		{3*time.Minute + 20*time.Second, "3m20s"},
+		{5 * time.Minute, "5m"},
+		{1*time.Hour + 5*time.Minute, "1h5m"},
+		{2 * time.Hour, "2h"},
+	}
+	for _, tt := range tests {
+		if got := fmtDowntime(tt.d); got != tt.want {
+			t.Errorf("fmtDowntime(%v) = %q, want %q", tt.d, got, tt.want)
+		}
+	}
+}
+
 func TestStartupDown(t *testing.T) {
 	mon := newStateMon(2, 2)
 	// A site that is down from the start is announced after the window.
-	mon.updateState(&probeResult{ok: false, reason: "refused"})
-	if msg := mon.updateState(&probeResult{ok: false, reason: "refused"}); msg == "" {
+	mon.updateState(&probeResult{ok: false, reason: "refused"}, time.Now())
+	if msg := mon.updateState(&probeResult{ok: false, reason: "refused"}, time.Now()); msg == "" {
 		t.Fatalf("no startup down messages")
 	}
 	if mon.state.State != stateDown {

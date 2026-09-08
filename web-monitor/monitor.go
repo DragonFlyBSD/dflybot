@@ -37,6 +37,10 @@ type webState struct {
 	State       string `json:"state"` // up|down|""(unknown)
 	PendingUp   int    `json:"pending_up,omitempty"`
 	PendingDown int    `json:"pending_down,omitempty"`
+	// DownSince is the unix time when the current down period started
+	// (only meaningful while State == "down"); used to report the total
+	// downtime in the recovery announcement.
+	DownSince int64 `json:"down_since,omitempty"`
 	// Certificate tracking (verified HTTPS only).
 	CertNotAfterUnix int64 `json:"cert_not_after_unix,omitempty"`
 	CertWarnedDays   int   `json:"cert_warned_days,omitempty"`
@@ -138,7 +142,7 @@ func (m *WebMonitor) poll() {
 	}
 
 	var msgs []string
-	if msg := m.updateState(res); msg != "" {
+	if msg := m.updateState(res, now); msg != "" {
 		msgs = append(msgs, msg)
 	}
 	if res.cert != nil {
@@ -162,7 +166,7 @@ func (m *WebMonitor) poll() {
 
 // updateState applies the probe result to the hysteresis state machine and
 // returns any announcement messages.
-func (m *WebMonitor) updateState(res *probeResult) string {
+func (m *WebMonitor) updateState(res *probeResult, now time.Time) string {
 	var msg string
 	st := &m.state
 	switch st.State {
@@ -178,6 +182,7 @@ func (m *WebMonitor) updateState(res *probeResult) string {
 			if st.PendingDown >= m.alert.DownRepeats {
 				st.State = stateDown
 				st.PendingDown = 0
+				st.DownSince = now.Unix()
 				msg = m.downMsg(res)
 			}
 		}
@@ -187,7 +192,8 @@ func (m *WebMonitor) updateState(res *probeResult) string {
 			if st.PendingUp >= m.alert.UpRepeats {
 				st.State = stateUp
 				st.PendingUp = 0
-				msg = m.upMsg(res)
+				st.DownSince = 0
+				msg = m.upMsg(res, now)
 			}
 		} else {
 			st.PendingUp = 0
@@ -246,8 +252,38 @@ func (m *WebMonitor) downMsg(res *probeResult) string {
 		m.cfg.URL, reason, m.alert.DownRepeats))
 }
 
-func (m *WebMonitor) upMsg(res *probeResult) string {
-	return m.prefix(fmt.Sprintf("UP: %s recovered", m.cfg.URL))
+func (m *WebMonitor) upMsg(res *probeResult, now time.Time) string {
+	text := fmt.Sprintf("UP: %s recovered", m.cfg.URL)
+	if m.state.DownSince != 0 {
+		down := now.Sub(time.Unix(m.state.DownSince, 0))
+		if down < 0 {
+			down = 0
+		}
+		text += fmt.Sprintf(" (down %s)", fmtDowntime(down))
+	}
+	return m.prefix(text)
+}
+
+// fmtDowntime renders a duration compactly, e.g. "45s", "3m20s", "1h5m".
+func fmtDowntime(d time.Duration) string {
+	secs := int(d.Seconds())
+	if secs < 60 {
+		return fmt.Sprintf("%ds", secs)
+	}
+	m := secs / 60
+	if m < 60 {
+		s := secs % 60
+		if s == 0 {
+			return fmt.Sprintf("%dm", m)
+		}
+		return fmt.Sprintf("%dm%ds", m, s)
+	}
+	h := m / 60
+	m = m % 60
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh%dm", h, m)
 }
 
 func (m *WebMonitor) post(text string) {
