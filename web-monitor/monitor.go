@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sort"
 	"sync"
 	"time"
@@ -39,7 +40,10 @@ type webState struct {
 	// Certificate tracking (verified HTTPS only).
 	CertNotAfterUnix int64 `json:"cert_not_after_unix,omitempty"`
 	CertWarnedDays   int   `json:"cert_warned_days,omitempty"`
-	UpdatedAt        int64 `json:"updated_at"`
+	// CertWarnedDate is the UTC date (YYYY-MM-DD) of the last "expired"
+	// warning; an expired certificate is re-announced at most once per day.
+	CertWarnedDate string `json:"cert_warned_date,omitempty"`
+	UpdatedAt      int64  `json:"updated_at"`
 }
 
 // webHistory is one line of the per-web .history JSONL file.
@@ -57,7 +61,8 @@ type WebMonitor struct {
 	prober       *prober
 	alert        *ConfigAlert
 	poster       monitor.Poster
-	expiringDays []int // in ascending order (e.g. [1 2 3 7 15]).
+	expiringDays []int  // in ascending order (e.g. [1 2 3 7 15]).
+	host         string // host of the probed URL, for the certificate messages
 	logger       *slog.Logger
 
 	statePath   string
@@ -67,23 +72,35 @@ type WebMonitor struct {
 	state webState
 }
 
-func newWebMonitor(web *ConfigWeb, prober *prober, poster monitor.Poster,
-	alert *ConfigAlert, tlsCfg *ConfigTLS, dataDir string, base *slog.Logger) *WebMonitor {
+func newWebMonitor(
+	web *ConfigWeb,
+	prober *prober,
+	poster monitor.Poster,
+	alert *ConfigAlert,
+	tlsCfg *ConfigTLS,
+	dataDir string,
+	base *slog.Logger,
+) *WebMonitor {
 	if base == nil {
 		base = slog.Default()
 	}
 	logger := base.With(slog.String("web", web.Name))
-	days := append([]int(nil), tlsCfg.ExpiringDays...)
+	days := append([]int(nil), tlsCfg.ExpiringDays...) // make a copy
 	if len(days) == 0 {
 		days = defaultExpiringDays
 	}
 	sort.Ints(days)
+	host := web.Name
+	if u, err := url.Parse(web.URL); err == nil && u.Hostname() != "" {
+		host = u.Hostname()
+	}
 	return &WebMonitor{
 		cfg:          web,
 		prober:       prober,
 		poster:       poster,
 		alert:        alert,
 		logger:       logger,
+		host:         host,
 		statePath:    dataDir + "/" + web.Name + ".state",
 		historyPath:  dataDir + "/" + web.Name + ".history",
 		history:      monitor.NewHistory(dataDir + "/" + web.Name + ".history"),
@@ -125,7 +142,7 @@ func (m *WebMonitor) poll() {
 		msgs = append(msgs, msg)
 	}
 	if res.cert != nil {
-		if msg := m.updateCert(res.cert); msg != "" {
+		if msg := m.updateCert(res.cert, now); msg != "" {
 			msgs = append(msgs, msg)
 		}
 	}
@@ -181,27 +198,36 @@ func (m *WebMonitor) updateState(res *probeResult) string {
 
 // updateCert checks the certificate expiry thresholds and returns a warning
 // message when a new threshold is crossed (once per threshold per cert).
-func (m *WebMonitor) updateCert(cert *certInfo) string {
+// An expired certificate is announced at most once per UTC day.
+func (m *WebMonitor) updateCert(cert *certInfo, now time.Time) string {
 	if m.state.CertNotAfterUnix != cert.notAfterUnix {
 		// New certificate: start over.
 		m.state.CertNotAfterUnix = cert.notAfterUnix
 		m.state.CertWarnedDays = m.expiringDays[len(m.expiringDays)-1] + 1
+		m.state.CertWarnedDate = ""
 	}
 	warned := m.state.CertWarnedDays
 	notAfter := time.Unix(cert.notAfterUnix, 0)
 
-	if cert.daysLeft < 0 && warned > 0 {
-		m.state.CertWarnedDays = 0
-		return m.prefix(fmt.Sprintf("certificate expired %s", notAfter.Format("2006-01-02")))
+	if cert.daysLeft < 0 {
+		// Expired: announce at most once per UTC day (roughly at midnight).
+		today := now.UTC().Format("2006-01-02")
+		if m.state.CertWarnedDate != today {
+			m.state.CertWarnedDate = today
+			return m.prefix(fmt.Sprintf("certificate for %s expired %s",
+				m.host, notAfter.Format("2006-01-02")))
+		}
+		return ""
 	}
+
 	// Find the highest (least urgent) yet-unwarned threshold that the
 	// certificate is now at or below.
 	for i := len(m.expiringDays) - 1; i >= 0; i-- {
 		t := m.expiringDays[i]
 		if cert.daysLeft <= t && t < warned {
 			m.state.CertWarnedDays = t
-			return m.prefix(fmt.Sprintf("certificate expires in %d day(s) (%s)",
-				cert.daysLeft, notAfter.Format("2006-01-02")))
+			return m.prefix(fmt.Sprintf("certificate for %s expires in %d day(s) (%s)",
+				m.host, cert.daysLeft, notAfter.Format("2006-01-02")))
 		}
 	}
 	return ""

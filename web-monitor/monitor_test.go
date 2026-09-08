@@ -48,6 +48,7 @@ func newStateMon(down, up int) *WebMonitor {
 		cfg:          &ConfigWeb{Name: "www", URL: "https://example.com/"},
 		poster:       &recordPoster{},
 		alert:        &ConfigAlert{DownRepeats: down, UpRepeats: up},
+		host:         "example.com",
 		expiringDays: []int{1, 2, 3, 7, 15},
 	}
 }
@@ -108,41 +109,64 @@ func certInfoAt(notAfter time.Time, days int) *certInfo {
 
 func TestCertThresholds(t *testing.T) {
 	mon := newStateMon(2, 2)
-	now := time.Now()
+	now := time.Date(2026, 9, 1, 0, 30, 0, 0, time.UTC)
 
 	// New certificate, plenty of days left: no warning, but initialized.
 	na := now.Add(30 * 24 * time.Hour)
-	if msg := mon.updateCert(certInfoAt(na, 30)); msg != "" {
+	if msg := mon.updateCert(certInfoAt(na, 30), now); msg != "" {
 		t.Fatalf("unexpected warning: %q", msg)
 	}
-	// Crosses 15: warn once.
+	// Crosses 15: warn once, with the domain.
 	na = now.Add(12 * 24 * time.Hour)
-	if msg := mon.updateCert(certInfoAt(na, 12)); !strings.Contains(msg, "expires in 12 day(s)") {
+	if msg := mon.updateCert(certInfoAt(na, 12), now); !strings.Contains(msg,
+		"certificate for example.com expires in 12 day(s)") {
 		t.Fatalf("warn at 12 days: %q", msg)
 	}
 	// Same days again: no repeat.
-	if msg := mon.updateCert(certInfoAt(na, 12)); msg != "" {
+	if msg := mon.updateCert(certInfoAt(na, 12), now); msg != "" {
 		t.Fatalf("repeat warning: %q", msg)
 	}
 	// Crosses 7 and then 1.
-	if msg := mon.updateCert(certInfoAt(na.Add(-6*24*time.Hour), 6)); !strings.Contains(msg, "expires in 6 day(s)") {
+	if msg := mon.updateCert(certInfoAt(na.Add(-6*24*time.Hour), 6), now); !strings.Contains(msg, "expires in 6 day(s)") {
 		t.Fatalf("warn at 6 days: %q", msg)
 	}
-	if msg := mon.updateCert(certInfoAt(na.Add(-11*24*time.Hour), 1)); !strings.Contains(msg, "expires in 1 day(s)") {
+	if msg := mon.updateCert(certInfoAt(na.Add(-11*24*time.Hour), 1), now); !strings.Contains(msg, "expires in 1 day(s)") {
 		t.Fatalf("warn at 1 day: %q", msg)
 	}
-	// Expired: warn once.
-	na = now.Add(-24 * time.Hour)
-	if msg := mon.updateCert(certInfoAt(na, -1)); !strings.Contains(msg, "certificate expired") {
+}
+
+func TestExpiredDaily(t *testing.T) {
+	mon := newStateMon(2, 2)
+	day1 := time.Date(2026, 9, 1, 0, 30, 0, 0, time.UTC)
+	day2 := day1.Add(24 * time.Hour)
+	notAfter := day1.Add(-48 * time.Hour)
+
+	cert := certInfoAt(notAfter, -2)
+	// First detection: announced, with the domain.
+	if msg := mon.updateCert(cert, day1); !strings.Contains(msg,
+		"certificate for example.com expired 2026-08-30") {
 		t.Fatalf("expired warning: %q", msg)
 	}
-	if msg := mon.updateCert(certInfoAt(na, -2)); msg != "" {
-		t.Fatalf("expired repeat warning: %q", msg)
+	// Same UTC day: no repeat.
+	if msg := mon.updateCert(cert, day1.Add(2*time.Hour)); msg != "" {
+		t.Fatalf("same-day repeat: %q", msg)
 	}
-	// A new certificate resets the warnings.
-	na = now.Add(20 * 24 * time.Hour)
-	if msg := mon.updateCert(certInfoAt(na, 20)); msg != "" {
+	// Next UTC day: warned again.
+	if msg := mon.updateCert(cert, day2); !strings.Contains(msg, "certificate for example.com expired") {
+		t.Fatalf("next-day warning: %q", msg)
+	}
+	if msg := mon.updateCert(cert, day2.Add(2*time.Hour)); msg != "" {
+		t.Fatalf("same-day repeat 2: %q", msg)
+	}
+
+	// A new certificate resets the warnings (including the daily date).
+	newCert := certInfoAt(day1.Add(30*24*time.Hour), 30)
+	if msg := mon.updateCert(newCert, day2); msg != "" {
 		t.Fatalf("new cert unexpected warning: %q", msg)
+	}
+	expired := certInfoAt(day1.Add(-24*time.Hour), -1)
+	if msg := mon.updateCert(expired, day2); !strings.Contains(msg, "expired") {
+		t.Fatalf("new expired cert not warned on the same day: %q", msg)
 	}
 }
 
@@ -160,7 +184,7 @@ func TestEndToEndPoll(t *testing.T) {
 
 	poster := &recordPoster{}
 	web := &ConfigWeb{Name: "w", URL: ts.URL, Interval: 30}
-	p, err := newProber(web, &ConfigTLS{}, &ConfigTimeouts{}, true, false)
+	p, err := newProber(web, &ConfigTimeouts{}, nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
