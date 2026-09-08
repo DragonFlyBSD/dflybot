@@ -63,9 +63,27 @@ type prober struct {
 	verifyTLS bool
 }
 
+// loadCAPool reads and parses the configured CA bundle once at startup.
+// It returns nil (use the system trust store) when no CA file is set.
+func loadCAPool(caFile string) (*x509.CertPool, error) {
+	if caFile == "" {
+		return nil, nil
+	}
+	pem, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read CA file %s: %w", caFile, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("no certificates in CA file %s", caFile)
+	}
+	return pool, nil
+}
+
 // newProber builds the HTTP client for one web from the per-web and the
-// global (tls, timeouts) settings.
-func newProber(web *ConfigWeb, tlsCfg *ConfigTLS, toCfg *ConfigTimeouts, follow bool, verify bool) (*prober, error) {
+// global (pool, timeouts) settings.  The CA pool is shared and parsed once
+// at startup (see loadCAPool).
+func newProber(web *ConfigWeb, toCfg *ConfigTimeouts, pool *x509.CertPool, follow bool, verify bool) (*prober, error) {
 	u, err := url.Parse(web.URL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, fmt.Errorf("invalid url %q", web.URL)
@@ -86,15 +104,7 @@ func newProber(web *ConfigWeb, tlsCfg *ConfigTLS, toCfg *ConfigTimeouts, follow 
 		tlsConf = &tls.Config{}
 		if !verify {
 			tlsConf.InsecureSkipVerify = true
-		} else if tlsCfg.CAFile != "" {
-			pem, err := os.ReadFile(tlsCfg.CAFile)
-			if err != nil {
-				return nil, fmt.Errorf("read CA file %s: %w", tlsCfg.CAFile, err)
-			}
-			pool := x509.NewCertPool()
-			if !pool.AppendCertsFromPEM(pem) {
-				return nil, fmt.Errorf("no certificates in CA file %s", tlsCfg.CAFile)
-			}
+		} else if pool != nil {
 			tlsConf.RootCAs = pool
 		}
 	}

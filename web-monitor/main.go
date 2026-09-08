@@ -131,6 +131,12 @@ func main() {
 	ctx, cancel := monitor.SignalContext()
 	defer cancel()
 
+	// Parse the CA bundle once at startup; shared by all webs.
+	caPool, err := loadCAPool(config.TLS.CAFile)
+	if err != nil {
+		slog.Error("CA bundle load failed", "ca_file", config.TLS.CAFile, "error", err)
+		os.Exit(1)
+	}
 	webhook := monitor.NewWebhook(&config.Webhook)
 	wg := &sync.WaitGroup{}
 
@@ -148,7 +154,7 @@ func main() {
 		if web.TLSVerify != nil {
 			verify = *web.TLSVerify
 		}
-		prober, err := newProber(web, &config.TLS, &config.Timeouts, follow, verify)
+		prober, err := newProber(web, &config.Timeouts, caPool, follow, verify)
 		if err != nil {
 			slog.Error("prober setup failed", "name", web.Name, "error", err)
 			os.Exit(1)

@@ -9,7 +9,13 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +23,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -24,7 +31,7 @@ import (
 func testProber(t *testing.T, url string, codes []int, follow, verify bool) *prober {
 	t.Helper()
 	web := &ConfigWeb{Name: "w", URL: url, StatusCodes: codes}
-	p, err := newProber(web, &ConfigTLS{}, &ConfigTimeouts{}, follow, verify)
+	p, err := newProber(web, &ConfigTimeouts{}, nil, follow, verify)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,8 +136,12 @@ func TestProbeTLSVerify(t *testing.T) {
 
 	// Verify with the server's own certificate as the trust store.
 	caFile := certPEM(t, ts.Certificate().Raw)
+	pool, err := loadCAPool(caFile)
+	if err != nil {
+		t.Fatal(err)
+	}
 	web := &ConfigWeb{Name: "w", URL: ts.URL}
-	p, err := newProber(web, &ConfigTLS{CAFile: caFile}, &ConfigTimeouts{}, true, true)
+	p, err := newProber(web, &ConfigTimeouts{}, pool, true, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,6 +152,54 @@ func TestProbeTLSVerify(t *testing.T) {
 	if res.cert.daysLeft <= 0 {
 		t.Errorf("daysLeft = %d, want positive", res.cert.daysLeft)
 	}
+}
+
+func TestLoadCAPool(t *testing.T) {
+	// No CA file: nil pool (system store).
+	pool, err := loadCAPool("")
+	if err != nil || pool != nil {
+		t.Fatalf("empty cfg: pool=%v err=%v", pool, err)
+	}
+	// Missing file: error.
+	if _, err := loadCAPool(filepath.Join(t.TempDir(), "nope.pem")); err == nil {
+		t.Fatal("missing CA file did not error")
+	}
+	// Garbage file: error.
+	garbage := filepath.Join(t.TempDir(), "bad.pem")
+	if err := os.WriteFile(garbage, []byte("not a pem"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadCAPool(garbage); err == nil {
+		t.Fatal("garbage CA file did not error")
+	}
+	// Valid bundle: non-nil pool.
+	caFile := certPEM(t, genTestCertDER(t))
+	pool, err = loadCAPool(caFile)
+	if err != nil || pool == nil {
+		t.Fatalf("valid CA: pool=%v err=%v", pool, err)
+	}
+}
+
+// genTestCertDER returns the DER of a self-signed test certificate.
+func genTestCertDER(t *testing.T) []byte {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "web-monitor test"},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der
 }
 
 func TestConfigDefaults(t *testing.T) {

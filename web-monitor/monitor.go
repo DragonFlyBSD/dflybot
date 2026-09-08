@@ -56,7 +56,6 @@ type WebMonitor struct {
 	cfg          *ConfigWeb
 	prober       *prober
 	alert        *ConfigAlert
-	tls          *ConfigTLS
 	poster       monitor.Poster
 	expiringDays []int // in ascending order (e.g. [1 2 3 7 15]).
 	logger       *slog.Logger
@@ -84,7 +83,6 @@ func newWebMonitor(web *ConfigWeb, prober *prober, poster monitor.Poster,
 		prober:       prober,
 		poster:       poster,
 		alert:        alert,
-		tls:          tlsCfg,
 		logger:       logger,
 		statePath:    dataDir + "/" + web.Name + ".state",
 		historyPath:  dataDir + "/" + web.Name + ".history",
