@@ -1,7 +1,11 @@
 NAME=	dflybot
 
 .PHONY: all
-all: dflybot git-monitor jenkins-monitor
+all: dflybot
+all: git-monitor
+all: github-monitor
+all: jenkins-monitor
+all: web-monitor
 
 .PHONY: dflybot
 dflybot:
@@ -18,6 +22,14 @@ dflybot:
 git-monitor:
 	make -C git-monitor
 
+.PHONY: github-monitor
+github-monitor:
+	make -C github-monitor
+
 .PHONY: jenkins-monitor
 jenkins-monitor:
 	make -C jenkins-monitor
+
+.PHONY: web-monitor
+web-monitor:
+	make -C web-monitor
