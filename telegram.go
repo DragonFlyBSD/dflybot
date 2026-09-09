@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"text/template"
 	"time"
 
 	"github.com/go-telegram/bot"
@@ -40,12 +41,13 @@ const (
 type TgBot struct {
 	bot    *bot.Bot
 	chats  []int64
+	format *template.Template
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
-func NewTgBot(token string, chats []int64) (*TgBot, error) {
+func NewTgBot(token string, chats []int64, format *template.Template) (*TgBot, error) {
 	b, err := bot.New(token,
 		bot.WithHTTPClient(pollTimeout, &http.Client{
 			Timeout: 2 * pollTimeout,
@@ -79,8 +81,9 @@ func NewTgBot(token string, chats []int64) (*TgBot, error) {
 	}
 
 	tgbot := &TgBot{
-		bot:   b,
-		chats: chats,
+		bot:    b,
+		chats:  chats,
+		format: format,
 	}
 
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/start", bot.MatchTypeExact,
@@ -164,27 +167,12 @@ func (b *TgBot) Post(msg Message) {
 		return
 	}
 
-	var text string
-	switch msg.Source {
-	case SourceIRC:
-		text = fmt.Sprintf("<b>[IRC %s]</b> ", msg.Target)
-		if msg.Event == "ACTION" {
-			text += fmt.Sprintf("👉 <code>%s</code> ", msg.From)
-		} else {
-			text += fmt.Sprintf("<code>%s</code>💬 ", msg.From)
-		}
-	case SourceWebhook:
-		text = fmt.Sprintf("<b>[Webhook %s]</b> ", msg.Target)
-		text += fmt.Sprintf("<code>%s</code>📢 ", msg.From)
-	default:
-		text = fmt.Sprintf("<b>[❓ %s]</b> ", msg.Target)
-		text += fmt.Sprintf("<code>%s</code> ", msg.From)
+	text, err := renderFormat(b.format, msg)
+	if err != nil {
+		slog.Error("TB bot message template render failed", "error", err)
+		// Fall back to the raw text so nothing is silently lost.
+		text = msg.Text
 	}
-	text += strings.NewReplacer(
-		"&", "&amp;",
-		"<", "&lt;",
-		">", "&gt;",
-	).Replace(msg.Text)
 
 	for _, chatID := range b.chats {
 		b.send(b.ctx, &bot.SendMessageParams{

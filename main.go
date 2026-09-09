@@ -54,6 +54,9 @@ type Config struct {
 		Port uint16 `toml:"port" validate:"port"`
 		// Whether to use SSL?
 		SSL bool `toml:"ssl"`
+		// Optional output template for messages posted to IRC; empty uses
+		// the built-in default (see format.go).
+		Template string `toml:"template"`
 		// List of channels to join
 		Channels []struct {
 			// The channel name (must prefix with '#')
@@ -71,6 +74,9 @@ type Config struct {
 		Token string `toml:"token" validate:"required_if=Enabled true"`
 		// The Chat IDs where to post messages.
 		Chats []int64 `toml:"chats"`
+		// Optional output template for messages posted to Telegram; empty
+		// uses the built-in default (see format.go).
+		Template string `toml:"template"`
 	} `toml:"telegram" validate:"required"`
 }
 
@@ -122,6 +128,18 @@ func main() {
 	var stoppers []interface{ Stop() }
 	flushInterval := time.Duration(config.FlushInterval) * time.Second
 
+	// Compile the message templates (config or built-in defaults).
+	ircFmt, err := parseFormat("irc", config.IRC.Template)
+	if err != nil {
+		slog.Error("invalid IRC message template", "error", err)
+		os.Exit(1)
+	}
+	tgFmt, err := parseFormat("telegram", config.Telegram.Template)
+	if err != nil {
+		slog.Error("invalid Telegram message template", "error", err)
+		os.Exit(1)
+	}
+
 	seen, err := NewSeenStore(config.DataDir, flushInterval)
 	if err != nil {
 		slog.Error("Seen store setup failed", "dir", config.DataDir, "error", err)
@@ -148,7 +166,7 @@ func main() {
 	}
 
 	if config.Telegram.Enabled {
-		tgbot, err := NewTgBot(config.Telegram.Token, config.Telegram.Chats)
+		tgbot, err := NewTgBot(config.Telegram.Token, config.Telegram.Chats, tgFmt)
 		if err != nil {
 			os.Exit(1)
 		}
@@ -175,7 +193,7 @@ func main() {
 			OpMe map[string]string
 		}{ch.Name, ch.OpMe})
 	}
-	ibot := NewIrcBot(icfg, bus, seen, chlog)
+	ibot := NewIrcBot(icfg, bus, seen, chlog, ircFmt)
 	go ibot.Start()
 	stoppers = append(stoppers, ibot)
 

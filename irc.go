@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"text/template"
 	"time"
 
 	irc "github.com/fluffle/goirc/client"
@@ -54,6 +55,7 @@ type IrcBot struct {
 	bus    *Bus
 	seen   *SeenStore
 	log    *LogStore
+	format *template.Template
 	cache  *ttlcache.Cache
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -65,7 +67,13 @@ type IrcBot struct {
 	members map[string]map[string]struct{}
 }
 
-func NewIrcBot(cfg *IrcConfig, bus *Bus, seen *SeenStore, log *LogStore) *IrcBot {
+func NewIrcBot(
+	cfg *IrcConfig,
+	bus *Bus,
+	seen *SeenStore,
+	log *LogStore,
+	format *template.Template,
+) *IrcBot {
 	ic := irc.NewConfig(cfg.Nick)
 	ic.Server = net.JoinHostPort(cfg.Server, strconv.Itoa(int(cfg.Port)))
 	ic.Timeout = 30 * time.Second
@@ -88,6 +96,7 @@ func NewIrcBot(cfg *IrcConfig, bus *Bus, seen *SeenStore, log *LogStore) *IrcBot
 		bus:     bus,
 		seen:    seen,
 		log:     log,
+		format:  format,
 		cache:   ttlcache.New(opmeLeeway*2, 0, nil),
 		members: make(map[string]map[string]struct{}),
 	}
@@ -663,16 +672,12 @@ func (b *IrcBot) Post(msg Message) {
 		}
 	}
 
-	var from string
-	switch msg.Source {
-	case SourceIRC:
-		from = fmt.Sprintf("[IRC %s]💬 ", msg.From)
-	case SourceWebhook:
-		from = fmt.Sprintf("[Webhook %s]📢 ", msg.From)
-	default:
-		from = fmt.Sprintf("[❓ %s] ", msg.From)
+	text, err := renderFormat(b.format, msg)
+	if err != nil {
+		slog.Error("IRC bot message template render failed", "error", err)
+		// Fall back to the raw text so nothing is silently lost.
+		text = msg.Text
 	}
-	text := from + msg.Text
 	b.say(msg.Target, text)
 	slog.Debug("IRC bot posted message", "target", msg.Target, "text", text)
 }

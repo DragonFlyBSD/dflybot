@@ -28,6 +28,10 @@ server = "irc.underworld.no"
 port = 6697
 # Whether to use SSL?
 ssl = true
+# Optional output template for messages posted to IRC.
+# Available fields: .Source .Target .From .Text .Event .IsAction .IsPrivate
+# template = ""
+
 # List of channels to join
 [[irc.channels]]
 # The channel name (must prefix with '#')
@@ -53,3 +57,7 @@ token = "???"
 # To obtain the Chat ID of a group chat, add the bot to the group and
 # send "/start" to the bot.
 chats = [???, ???]
+# Optional output template for messages posted to Telegram (HTML).
+# Available fields: .Source .Target .From .Text .Event .IsAction .IsPrivate
+# Helpers: html
+# template = ""
