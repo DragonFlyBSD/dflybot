@@ -16,7 +16,12 @@
 //     monitor was down are not each announced.  A failure already announced
 //     before (recorded in the state file) is not re-announced when no new
 //     build happened since.
-//   - Nodes (computers) are announced only on offline<->online transitions.
+//   - Jobs stuck in the build queue (waiting for an executor) are announced
+//     once per queue item, when older than queue_stuck_after (or marked
+//     stuck by Jenkins); a "queue cleared" message follows when the item
+//     disappears.
+//   - Nodes (computers) are only monitored when explicitly listed in the
+//     config's node whitelist.
 //
 // The monitor runs its poll loop in a single goroutine; no locking needed.
 //
@@ -49,6 +54,9 @@ const (
 	// maxNewBuilds caps how many new completed builds are processed in one
 	// poll; a larger gap is collapsed onto the newest build only.
 	maxNewBuilds = 20
+	// defaultQueueStuckAfter is the default age (seconds) after which a
+	// queued build is announced as stuck.
+	defaultQueueStuckAfter = 300
 )
 
 // jobState is the persisted per-job tracking state.
@@ -60,6 +68,12 @@ type jobState struct {
 	Consecutive int    `json:"consecutive"` // consecutive failed builds
 	LastURL     string `json:"last_url,omitempty"`
 	LastSeen    int64  `json:"last_seen"` // unix seconds of the last poll
+
+	// Queue watchdog: the queue item whose "stuck" state was announced
+	// (0 = none).  InQueueSince is the epoch in milliseconds.
+	StuckItemID int64  `json:"stuck_item_id,omitempty"`
+	StuckSince  int64  `json:"stuck_since,omitempty"`
+	StuckWhy    string `json:"stuck_why,omitempty"`
 }
 
 func (st *jobState) toHistory(name string) *historyLine {
@@ -100,7 +114,7 @@ type monitorState struct {
 // historyLine is one JSONL line of the .history file.
 type historyLine struct {
 	Timestamp time.Time `json:"ts"`
-	Type      string    `json:"type"` // "job" or "node"
+	Type      string    `json:"type"` // "job", "node" or "queue"
 	Name      string    `json:"name"`
 	State     string    `json:"state,omitempty"`
 	Result    string    `json:"result,omitempty"`
@@ -108,6 +122,8 @@ type historyLine struct {
 	URL       string    `json:"url,omitempty"`
 	Offline   *bool     `json:"offline,omitempty"`
 	Reason    string    `json:"reason,omitempty"`
+	QueueTime int64     `json:"queue_time_ms,omitempty"`
+	StuckTime int64     `json:"stuck_time_ms,omitempty"`
 }
 
 type Monitor struct {
@@ -192,10 +208,9 @@ func (m *Monitor) poll() {
 		m.logger.Warn("node poll failed", "error", err)
 		ok = false
 	}
-	// Flush the poll's history lines even when parts failed, so that the
-	// lines of the successfully polled jobs are not lost.
-	if err := m.history.Flush(); err != nil {
-		m.logger.Error("history flush failure", "path", m.historyPath, "error", err)
+	if err := m.pollQueue(); err != nil {
+		m.logger.Warn("queue poll failed", "error", err)
+		ok = false
 	}
 	if !ok {
 		return
@@ -204,6 +219,9 @@ func (m *Monitor) poll() {
 	m.firstPoll = false
 	m.state.UpdatedAt = time.Now().Unix()
 	m.saveState()
+	if err := m.history.Flush(); err != nil {
+		m.logger.Error("history flush failure", "path", m.historyPath, "error", err)
+	}
 }
 
 // pollJob announces any new failed build(s) of one job.
@@ -314,8 +332,12 @@ func (m *Monitor) processBuild(job string, st *jobState, b *jenkinsBuild) {
 	st.LastURL = b.URL
 }
 
-// pollNodes announces node offline/online transitions.
+// pollNodes announces node offline/online transitions for the nodes listed in
+// the config.  With no nodes configured, node monitoring is disabled.
 func (m *Monitor) pollNodes() error {
+	if len(m.cfg.Nodes) == 0 {
+		return nil // no nodes configured; ignore all executors
+	}
 	now := time.Now()
 	computers, err := m.jenkins.computers()
 	if err != nil {
@@ -371,6 +393,72 @@ func (m *Monitor) pollNodes() error {
 	return nil
 }
 
+// pollQueue watches the Jenkins build queue for jobs stuck waiting for an
+// executor.  A job whose queue item is older than queue_stuck_after (or
+// that Jenkins itself marks as stuck) is announced once per queue item;
+// when the item clears, a "queue cleared" message is announced.
+func (m *Monitor) pollQueue() error {
+	items, err := m.jenkins.queueItems()
+	if err != nil {
+		return err
+	}
+
+	byJob := make(map[string]jenkinsQueueItem, len(items))
+	for _, it := range items {
+		byJob[it.Task.Name] = it
+	}
+
+	stuckAfter := m.cfg.QueueStuckAfter
+	if stuckAfter <= 0 {
+		stuckAfter = defaultQueueStuckAfter
+	}
+	threshold := time.Duration(stuckAfter) * time.Second
+
+	for _, name := range m.cfg.Jobs {
+		st := m.state.Jobs[name]
+		if st == nil {
+			st = &jobState{State: stateUnknown}
+			m.state.Jobs[name] = st
+		}
+
+		item, queued := byJob[name]
+		if !queued {
+			// Not queued anymore: clear a previously announced stuck
+			// queue item.
+			if st.StuckItemID != 0 {
+				age := time.Since(time.UnixMilli(st.StuckSince))
+				m.logger.Info("queue cleared", "job", name, "item", st.StuckItemID)
+				m.announce(m.queueText(name, "queue cleared", "", age))
+				m.logHistory(&historyLine{Type: "queue", Name: name, State: "cleared",
+					StuckTime: age.Milliseconds()})
+				st.StuckItemID = 0
+				st.StuckSince = 0
+				st.StuckWhy = ""
+			}
+			continue
+		}
+		if st.StuckItemID == item.ID {
+			continue // already announced for this queue item
+		}
+
+		age := time.Since(time.UnixMilli(item.InQueueSince))
+		if age < 0 {
+			age = 0
+		}
+		if item.Stuck || age >= threshold {
+			st.StuckItemID = item.ID
+			st.StuckSince = item.InQueueSince
+			st.StuckWhy = item.Why
+			m.logger.Info("job stuck in queue", "job", name, "item", item.ID,
+				"why", item.Why, "age", age)
+			m.announce(m.queueText(name, "STUCK in queue", item.Why, age))
+			m.logHistory(&historyLine{Type: "queue", Name: name, State: "stuck",
+				Reason: item.Why, QueueTime: age.Milliseconds()})
+		}
+	}
+	return nil
+}
+
 func (m *Monitor) announce(text string) {
 	msg := fmt.Sprintf("[%s] %s", m.cfg.Name, text)
 	m.logger.Debug("announce message", "msg", msg)
@@ -410,6 +498,35 @@ func (m *Monitor) nodeText(name string, offline bool, reason string) string {
 		text += "back ONLINE"
 	}
 	return text
+}
+
+// queueText builds the stuck/cleared announcement for a job.
+func (m *Monitor) queueText(job, verb, why string, age time.Duration) string {
+	text := fmt.Sprintf("%s %s", job, verb)
+	if why != "" {
+		// collapses whitespace in the reason string.
+		text += ": " + strings.Join(strings.Fields(why), " ")
+	}
+	if age > 0 {
+		text += fmt.Sprintf(" (since %s ago)", queueAge(age))
+	}
+	return text
+}
+
+// queueAge renders a duration compactly (e.g. "5m", "2h10m").
+func queueAge(age time.Duration) string {
+	if age < time.Minute {
+		return "<1m"
+	}
+	if age < time.Hour {
+		return fmt.Sprintf("%dm", int(age.Minutes()))
+	}
+	h := int(age.Hours())
+	m := int(age.Minutes()) % 60
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh%dm", h, m)
 }
 
 // Persistence: state (JSON, atomic) and history (JSONL).

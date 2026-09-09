@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // ---- helpers ----
@@ -53,6 +54,17 @@ type jenkinsStub struct {
 	last      map[string]stubBuild        // job name -> last completed build
 	builds    map[string]map[int64]string // job name -> build number -> result
 	computers []stubComputer
+	queue     []stubQueue
+}
+
+type stubQueue struct {
+	ID           int64  `json:"id"`
+	Why          string `json:"why"`
+	Stuck        bool   `json:"stuck"`
+	InQueueSince int64  `json:"inQueueSince"` // epoch ms
+	Task         struct {
+		Name string `json:"name"`
+	} `json:"task"`
 }
 
 type stubComputer struct {
@@ -88,6 +100,12 @@ func (s *jenkinsStub) setComputers(cs []stubComputer) {
 	s.computers = append([]stubComputer(nil), cs...)
 }
 
+func (s *jenkinsStub) setQueue(items []stubQueue) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.queue = append([]stubQueue(nil), items...)
+}
+
 // handler serves the fake Jenkins REST API.
 func (s *jenkinsStub) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -96,6 +114,15 @@ func (s *jenkinsStub) handler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
 		switch {
+		case parts[0] == "queue" && len(parts) == 3 && parts[1] == "api" && parts[2] == "json":
+			// queue/api/json
+			items := s.queue
+			if items == nil {
+				items = []stubQueue{}
+			}
+			json.NewEncoder(w).Encode(struct {
+				Items []stubQueue `json:"items"`
+			}{items})
 		case parts[0] == "computer": // computer/api/json
 			if len(parts) == 3 && parts[1] == "api" && parts[2] == "json" {
 				json.NewEncoder(w).Encode(struct {
@@ -264,7 +291,9 @@ func TestMonitorNodeTransitions(t *testing.T) {
 	defer ts.Close()
 
 	poster := &recordPoster{}
-	m, _ := newTestMonitor(t, fakeCfg(ts), poster)
+	cfg := fakeCfg(ts)
+	cfg.Nodes = []string{"Built-In Node"}
+	m, _ := newTestMonitor(t, cfg, poster)
 	m.poll() // baseline; nothing announced (online)
 	if got := poster.messages(); len(got) != 0 {
 		t.Fatalf("baseline announced: %v", got)
@@ -296,7 +325,9 @@ func TestMonitorNodeStartupOffline(t *testing.T) {
 	defer ts.Close()
 
 	poster := &recordPoster{}
-	m, _ := newTestMonitor(t, fakeCfg(ts), poster)
+	cfg := fakeCfg(ts)
+	cfg.Nodes = []string{"Build1"}
+	m, _ := newTestMonitor(t, cfg, poster)
 	m.poll()
 	msgs := poster.messages()
 	if len(msgs) != 1 || !strings.Contains(msgs[0], "`Build1` OFFLINE: down") {
@@ -371,5 +402,93 @@ func TestMonitorStateAndHistoryFiles(t *testing.T) {
 	}
 	if !strings.Contains(string(hist), `"type":"job"`) {
 		t.Errorf("history lines: %s", hist)
+	}
+}
+
+// queueItemAt builds a queue item for the monitored job.
+func queueItemAt(id int64, since time.Time, why string) stubQueue {
+	var it stubQueue
+	it.ID = id
+	it.Why = why
+	it.InQueueSince = since.UnixMilli()
+	it.Task.Name = "DragonFlyBSD"
+	return it
+}
+
+func TestMonitorQueueStuckOnceThenCleared(t *testing.T) {
+	stub := &jenkinsStub{}
+	stub.setLast("DragonFlyBSD", stubBuild{Number: 1, Result: "SUCCESS", URL: "https://ci/x/1/"})
+	now := time.Now()
+	// A young queue item is below the default (300s) threshold: nothing.
+	stub.setQueue([]stubQueue{queueItemAt(1, now.Add(-2*time.Minute),
+		"Waiting for next available executor")})
+	ts := httptest.NewServer(stub.handler())
+	defer ts.Close()
+
+	poster := &recordPoster{}
+	m, _ := newTestMonitor(t, fakeCfg(ts), poster) // QueueStuckAfter unset => default
+	m.poll()
+	if got := poster.messages(); len(got) != 0 {
+		t.Fatalf("young queue item announced: %v", got)
+	}
+
+	// An old queue item is announced once, with the age.
+	stub.setQueue([]stubQueue{queueItemAt(2, now.Add(-10*time.Minute),
+		"Waiting for next available executor")})
+	m.poll()
+	if got := poster.messages(); len(got) != 1 ||
+		!strings.Contains(got[0], "DragonFlyBSD STUCK in queue") ||
+		!strings.Contains(got[0], "since 10m ago") {
+		t.Fatalf("stuck messages = %v", got)
+	}
+
+	// ... and not again while the same item stays queued.
+	m.poll()
+	if got := poster.messages(); len(got) != 1 {
+		t.Fatalf("stuck re-announced: %v", got)
+	}
+
+	// When the item clears, announce once.
+	stub.setQueue(nil)
+	m.poll()
+	if got := poster.messages(); len(got) != 2 || !strings.Contains(got[1], "queue cleared") {
+		t.Fatalf("cleared messages = %v", got)
+	}
+}
+
+func TestMonitorQueueStuckFlag(t *testing.T) {
+	stub := &jenkinsStub{}
+	stub.setLast("DragonFlyBSD", stubBuild{Number: 1, Result: "SUCCESS", URL: "https://ci/x/1/"})
+	// A fresh item that Jenkins itself marks as stuck is announced at once.
+	it := queueItemAt(9, time.Now(), "no available executors")
+	it.Stuck = true
+	stub.setQueue([]stubQueue{it})
+	ts := httptest.NewServer(stub.handler())
+	defer ts.Close()
+
+	poster := &recordPoster{}
+	m, _ := newTestMonitor(t, fakeCfg(ts), poster)
+	m.poll()
+	if got := poster.messages(); len(got) != 1 ||
+		!strings.Contains(got[0], "STUCK in queue: no available executors") {
+		t.Fatalf("stuck-flag messages = %v", got)
+	}
+}
+
+func TestNodeDisabledByDefault(t *testing.T) {
+	stub := &jenkinsStub{}
+	stub.setLast("DragonFlyBSD", stubBuild{Number: 1, Result: "SUCCESS", URL: "https://ci/x/1/"})
+	// Ephemeral agents must not be announced when no nodes are configured.
+	stub.setComputers([]stubComputer{
+		{DisplayName: "ephemeral-abc", Offline: true, OfflineCauseReason: "churn"},
+	})
+	ts := httptest.NewServer(stub.handler())
+	defer ts.Close()
+
+	poster := &recordPoster{}
+	m, _ := newTestMonitor(t, fakeCfg(ts), poster) // no nodes configured
+	m.poll()
+	if got := poster.messages(); len(got) != 0 {
+		t.Fatalf("ephemeral offline announced without whitelist: %v", got)
 	}
 }

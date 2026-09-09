@@ -132,6 +132,31 @@ func (c *jenkinsClient) build(name string, number int64) (*jenkinsBuild, error) 
 	return &b, nil
 }
 
+// jenkinsQueueItem is one item of the Jenkins build queue (a build waiting
+// for an executor).  InQueueSince is an epoch timestamp in milliseconds.
+type jenkinsQueueItem struct {
+	ID           int64  `json:"id"`
+	Why          string `json:"why"`
+	Stuck        bool   `json:"stuck"`
+	InQueueSince int64  `json:"inQueueSince"`
+	Task         struct {
+		Name string `json:"name"`
+	} `json:"task"`
+}
+
+// queueItems lists the current build queue items.
+func (c *jenkinsClient) queueItems() ([]jenkinsQueueItem, error) {
+	query := url.Values{"tree": {"items[id,why,stuck,inQueueSince,task[name]]"}}
+	path := c.baseURL + "/queue/api/json?" + query.Encode()
+	var set struct {
+		Items []jenkinsQueueItem `json:"items"`
+	}
+	if err := c.get(path, &set); err != nil {
+		return nil, err
+	}
+	return set.Items, nil
+}
+
 // computers lists the Jenkins nodes (computers).
 func (c *jenkinsClient) computers() ([]jenkinsNode, error) {
 	var set struct {

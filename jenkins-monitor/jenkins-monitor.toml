@@ -21,9 +21,13 @@ jobs = [
     "dragonflybsd-complete",
 ]
 
-# Optional: permanent execution nodes to monitor, excluding the ephemeral
-# agents; empty means monitor all computers.
+# Optional: the execution nodes to monitor (offline/online announcements).
+# An empty list disables node monitoring entirely.
 # nodes = ["Built-In Node"]
+
+# A queued build (waiting for an executor) not started after this many
+# seconds is announced as stuck; defaults to 300.
+queue_stuck_after = 300
 
 # Optional credentials for private instances (basic auth).
 # user = ""

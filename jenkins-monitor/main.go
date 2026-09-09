@@ -46,21 +46,22 @@ type ConfigJenkins struct {
 	Interval int `toml:"interval" validate:"required,min=1"`
 	// List of jobs to monitor
 	Jobs []string `toml:"jobs" validate:"required,min=1,dive,required"`
-	// Optional list of permanent execution nodes to monitor;
-	// empty means monitor all computers.
+	// Optional list of the execution nodes to monitor.
+	// An empty list disables node monitoring entirely.
 	Nodes []string `toml:"nodes"`
+	// A queued build (waiting for an executor) not started after this
+	// many seconds is announced as stuck; defaults to 300.
+	QueueStuckAfter int `toml:"queue_stuck_after" validate:"omitempty,min=1"`
 	// Optional credentials for private instances (basic auth).
 	User     string `toml:"user"`
 	Password string `toml:"password"`
 	APIToken string `toml:"api_token"`
 }
 
-// nodeWanted reports whether a computer should be monitored, given the
-// optional whitelist of permanent nodes.
+// nodeWanted reports whether a computer should be monitored.
+// Only the nodes explicitly listed in the config are tracked; an empty list
+// disables node monitoring.
 func (cfg *ConfigJenkins) nodeWanted(name string) bool {
-	if len(cfg.Nodes) == 0 {
-		return true
-	}
 	for _, n := range cfg.Nodes {
 		if strings.EqualFold(n, name) {
 			return true
