@@ -94,7 +94,11 @@ func (a *activity) line() string {
 	if a.action == "comment" {
 		return fmt.Sprintf("%s commented on %s #%d: %s", a.actor, a.kind, a.number, a.title)
 	}
-	return fmt.Sprintf("%s #%d (%s) %s by %s", a.kind, a.number, a.title, verb, a.actor)
+	line := fmt.Sprintf("%s #%d (%s) %s by %s", a.kind, a.number, a.title, verb, a.actor)
+	if a.action == "create" && a.url != "" {
+		line += ": " + a.url
+	}
+	return line
 }
 
 // ghHistoryLine is one line of the .history JSONL file.
@@ -360,23 +364,25 @@ func (m *RepoMonitor) classify(e *ghEvent) (*activity, bool) {
 		if ref == nil {
 			return nil, false
 		}
-		var action string
-		switch e.Payload.Action {
-		case "opened":
-			action = "create"
-		case "closed":
-			if ref.IsMerged() {
-				action = "merge"
-			} else {
-				action = "close"
-			}
-		case "reopened":
-			action = "reopen"
-		case "synchronize", "edited":
-			action = "update"
-		}
+		action := map[string]string{
+			"opened":      "create",
+			"closed":      "close",
+			"merged":      "merge",
+			"reopened":    "reopen",
+			"synchronize": "update",
+			"edited":      "update",
+		}[e.Payload.Action]
 		if action == "" {
 			return nil, false
+		}
+		if actionWanted(activityPR, action, m.cfg.IssueActions, m.cfg.PRActions) {
+			// The Events API abbreviates the pull_request in
+			// PullRequestEvent payloads to url/id/number/head/base,
+			// so the title/html_url.  Fetch the full pull request
+			// for announced events only (keeps API traffic low).
+			if ref.Title == "" || ref.HtmlUrl == "" {
+				m.fillPR(ref)
+			}
 		}
 		a = &activity{
 			kind:    activityPR,
@@ -388,22 +394,22 @@ func (m *RepoMonitor) classify(e *ghEvent) (*activity, bool) {
 			eventID: int64(e.ID),
 		}
 	case "IssueCommentEvent":
-		ref := e.Payload.Issue
+		issue := e.Payload.Issue
 		comment := e.Payload.Comment
-		if ref == nil || comment == nil {
+		if issue == nil || comment == nil {
 			return nil, false
 		}
 		kind := activityIssue
-		if ref.IsPR() {
+		if issue.IsPR() {
 			kind = activityPR
 		}
 		a = &activity{
 			kind:    kind,
 			action:  "comment",
-			number:  ref.Number,
+			number:  issue.Number,
 			actor:   e.Actor.Login,
 			title:   snippet(comment.Body, commentMax),
-			url:     ref.HtmlUrl,
+			url:     issue.HtmlUrl,
 			eventID: int64(e.ID),
 		}
 	default:
@@ -413,6 +419,18 @@ func (m *RepoMonitor) classify(e *ghEvent) (*activity, bool) {
 		return nil, false
 	}
 	return a, true
+}
+
+func (m *RepoMonitor) fillPR(ref *ghRef) {
+	if m.github == nil || ref.URL == "" {
+		return
+	}
+	full, err := m.github.getRef(ref.URL)
+	if err != nil {
+		m.logger.Warn("pull request details fetch failed", "url", ref.URL, "error", err)
+		return
+	}
+	*ref = *full
 }
 
 // announce posts the activities batched by repo, split at the poster's

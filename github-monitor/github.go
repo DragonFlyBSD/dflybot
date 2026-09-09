@@ -2,6 +2,10 @@
 //
 // GitHub REST API client (read-only) for the repository Events API.
 //
+// References:
+// - GitHub event types
+//   https://docs.github.com/en/rest/using-the-rest-api/github-event-types
+//
 // Co-authored-by: DeepSeek-v4-flash (with Pi Coding Agent)
 //
 
@@ -68,6 +72,9 @@ type ghPayload struct {
 
 // ghRef is a referenced issue or pull request.
 type ghRef struct {
+	// API URL of the object; used to fetch the full object when the event
+	// payload carries an abbreviated one.
+	URL     string `json:"url"`
 	Number  int64  `json:"number"`
 	Title   string `json:"title"`
 	State   string `json:"state"`
@@ -75,8 +82,6 @@ type ghRef struct {
 	User    struct {
 		Login string `json:"login"`
 	} `json:"user"`
-	Merged      bool            `json:"merged"`
-	MergedAt    string          `json:"merged_at"`
 	PullRequest json.RawMessage `json:"pull_request"` // non-null when a PR
 }
 
@@ -84,11 +89,6 @@ type ghRef struct {
 // be a pull request in the issues/comments payloads).
 func (r *ghRef) IsPR() bool {
 	return len(r.PullRequest) > 0 && string(r.PullRequest) != "null"
-}
-
-// IsMerged reports whether a closed pull request was merged.
-func (r *ghRef) IsMerged() bool {
-	return r.Merged || r.MergedAt != ""
 }
 
 type ghComment struct {
@@ -199,6 +199,36 @@ func (c *githubClient) getEventsPage(url, etag string) (eventsPage, string, bool
 	}
 	return eventsPage{events: events, etag: resp.Header.Get("ETag")},
 		linkNext(resp.Header.Get("Link")), true, nil
+}
+
+// getRef fetches the full issue or pull request at the given API URL, as
+// referenced by an event payload (e.g., an abbreviated pull_request whose
+// details the Events API does not include).
+func (c *githubClient) getRef(apiURL string) (*ghRef, error) {
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("github: http status %d: %s",
+			resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var ref ghRef
+	if err := json.NewDecoder(resp.Body).Decode(&ref); err != nil {
+		return nil, fmt.Errorf("github: decode ref: %w", err)
+	}
+	return &ref, nil
 }
 
 // linkNext extracts the URL of the "next" page from a Link header.

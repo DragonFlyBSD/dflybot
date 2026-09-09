@@ -439,3 +439,118 @@ func TestMonitorCommentEvent(t *testing.T) {
 		t.Fatalf("comment messages = %v", msgs)
 	}
 }
+
+// eventsAndRefStub serves the repository events list as well as the full
+// pull request referenced by the events' payload URL, mirroring the real
+// Events API that abbreviates pull_request payloads.
+type eventsAndRefStub struct {
+	mu     sync.Mutex
+	etag   string
+	events []string // newest first; may embed "$BASE$"
+	fullPR string   // full PR JSON for GET /pulls/1668
+	refGot int      // number of full PR fetches
+}
+
+func (s *eventsAndRefStub) setEvents(etag string, list []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.etag = etag
+	s.events = append([]string(nil), list...)
+}
+
+func (s *eventsAndRefStub) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		base := "http://" + r.Host
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/events"):
+			if r.Header.Get("If-None-Match") == s.etag {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("ETag", s.etag)
+			fmt.Fprint(w, "[")
+			for i, e := range s.events {
+				if i > 0 {
+					fmt.Fprint(w, ",")
+				}
+				fmt.Fprint(w, strings.ReplaceAll(e, "$BASE$", base))
+			}
+			fmt.Fprint(w, "]")
+		case strings.HasSuffix(r.URL.Path, "/pulls/1668"):
+			s.refGot++
+			fmt.Fprint(w, strings.ReplaceAll(s.fullPR, "$BASE$", base))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// TestMonitorPRDetailsAndMerge is the regression test for the two data
+// problems of the Events API: pull_request payloads are abbreviated to
+// url/id/number/head/base (so title and html_url must be fetched), and a
+// merged PR arrives as its own event with action "merged" (which must be
+// announced).  It also checks that creation announcements carry the URL
+// and that the history records title and url.
+func TestMonitorPRDetailsAndMerge(t *testing.T) {
+	abbrevPR := `{"url":"$BASE$/repos/o/r/pulls/1668","id":4479651821,"number":1668,
+		"head":{"ref":"agentic/x","sha":"111","repo":{"id":1}},
+		"base":{"ref":"master","sha":"222","repo":{"id":1}}}`
+	prEvent := func(id, action, at string) string {
+		return fmt.Sprintf(`{"id":%q,"type":"PullRequestEvent","created_at":%q,
+			"actor":{"login":"dragonflybot"},"payload":{"action":%q,"pull_request":%s}}`,
+			id, at, action, abbrevPR)
+	}
+	fullPR := `{"url":"$BASE$/repos/o/r/pulls/1668","id":4479651821,"number":1668,
+		"state":"closed","title":"devel/libcxx22: fix build failure on DragonFly",
+		"html_url":"https://github.com/o/r/pull/1668","user":{"login":"dragonflybot"},
+		"merged":true,"merged_at":"2026-09-08T23:59:54Z"}`
+
+	stub := &eventsAndRefStub{fullPR: fullPR}
+	stub.setEvents(`"e0"`, []string{openEventAt("0", "2026-09-08T23:00:00Z")})
+	ts := httptest.NewServer(stub.handler())
+	defer ts.Close()
+
+	poster := &recordPoster{}
+	m, dir := newTestMonitor(t, ts, defaultRepo(), poster)
+	m.poll() // seed silently
+
+	stub.setEvents(`"e1"`, []string{
+		prEvent("14672592472", "merged", "2026-09-08T23:59:54Z"), // newest first
+		prEvent("14672578728", "opened", "2026-09-08T23:59:31Z"),
+	})
+	m.poll()
+
+	msgs := poster.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %d: %v", len(msgs), msgs)
+	}
+	for _, want := range []string{
+		"PR #1668 (devel/libcxx22: fix build failure on DragonFly) opened by dragonflybot:" +
+			" https://github.com/o/r/pull/1668",
+		"PR #1668 (devel/libcxx22: fix build failure on DragonFly) merged by dragonflybot",
+	} {
+		if !strings.Contains(msgs[0], want) {
+			t.Errorf("message missing %q:\n%s", want, msgs[0])
+		}
+	}
+	if stub.refGot != 2 {
+		t.Errorf("full PR fetches = %d, want 2", stub.refGot)
+	}
+	// The saved history carries title and url for both events.
+	hist, err := os.ReadFile(filepath.Join(dir, "o", "r.history"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"kind":"PR","action":"create"`, `"action":"merge"`,
+		`"title":"devel/libcxx22: fix build failure on DragonFly"`,
+		`"url":"https://github.com/o/r/pull/1668"`,
+	} {
+		if !strings.Contains(string(hist), want) {
+			t.Errorf("history missing %q:\n%s", want, hist)
+		}
+	}
+}

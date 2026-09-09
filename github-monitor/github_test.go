@@ -80,6 +80,7 @@ func TestClassify(t *testing.T) {
 		{eventJSON("IssuesEvent", "3", "reopened"), "reopen", true},
 		{eventJSON("IssuesEvent", "4", "labeled"), "", false}, // unsupported
 		{eventJSON("PullRequestEvent", "5", "opened"), "create", true},
+		{eventJSON("PullRequestEvent", "30", "merged"), "merge", true},
 		{eventJSON("PullRequestEvent", "6", "synchronize"), "update", true},
 		{eventJSON("PullRequestEvent", "7", "edited"), "update", true},
 		{eventJSON("PullRequestEvent", "8", "closed"), "close", true},
@@ -96,18 +97,6 @@ func TestClassify(t *testing.T) {
 		if ok && a.action != tt.wantAction {
 			t.Errorf("%s: action=%s, want %s", tt.raw[:30], a.action, tt.wantAction)
 		}
-	}
-}
-
-func TestClassifyMergedPR(t *testing.T) {
-	raw := `{"id":"1","type":"PullRequestEvent","created_at":"2026-09-06T12:00:00Z",
-		"actor":{"login":"aly"},"payload":{"action":"closed","pull_request":{
-		"number":200,"title":"big change","html_url":"https://github.com/o/r/pull/200",
-		"user":{"login":"carol"},"merged":true,"merged_at":"2026-09-06T11:00:00Z"}}}`
-	mon := NewRepoMonitor(&ConfigRepo{Project: "o", Repo: "r"}, nil, nil, t.TempDir(), nil)
-	a, ok := mon.classify(decodeEvent(t, raw))
-	if !ok || a.action != "merge" {
-		t.Fatalf("merged PR classified as %+v, ok=%v", a, ok)
 	}
 }
 
@@ -131,6 +120,39 @@ func TestActionWanted(t *testing.T) {
 			t.Errorf("actionWanted(%s,%s,%v,%v) = %v, want %v",
 				tt.kind, tt.action, tt.issues, tt.pulls, got, tt.want)
 		}
+	}
+}
+
+func TestGetRef(t *testing.T) {
+	pr := `{"url":"https://api.github.com/repos/o/r/pulls/9","id":1,"number":9,
+		"state":"open","title":"fix foo","html_url":"https://github.com/o/r/pull/9",
+		"user":{"login":"bob"}}`
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(pr))
+	}))
+	defer ts.Close()
+
+	c := newGitHubClient("tok")
+	ref, err := c.getRef(ts.URL + "/pulls/9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref.Number != 9 || ref.Title != "fix foo" ||
+		ref.HtmlUrl != "https://github.com/o/r/pull/9" {
+		t.Errorf("ref = %+v", ref)
+	}
+}
+
+func TestGetRefError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	c := newGitHubClient("")
+	if _, err := c.getRef(ts.URL + "/pulls/404"); err == nil {
+		t.Error("expected an error for a 404 reply")
 	}
 }
 
