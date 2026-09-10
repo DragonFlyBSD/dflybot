@@ -180,20 +180,20 @@ func (m *WebMonitor) updateState(res *probeResult, now time.Time) string {
 		} else {
 			st.PendingDown++
 			if st.PendingDown >= m.alert.DownRepeats {
+				msg = m.downMsg(res)
 				st.State = stateDown
 				st.PendingDown = 0
 				st.DownSince = now.Unix()
-				msg = m.downMsg(res)
 			}
 		}
 	case stateDown:
 		if res.ok {
 			st.PendingUp++
 			if st.PendingUp >= m.alert.UpRepeats {
+				msg = m.upMsg(res, now.Sub(time.Unix(st.DownSince, 0)))
 				st.State = stateUp
 				st.PendingUp = 0
 				st.DownSince = 0
-				msg = m.upMsg(res, now)
 			}
 		} else {
 			st.PendingUp = 0
@@ -252,13 +252,9 @@ func (m *WebMonitor) downMsg(res *probeResult) string {
 		m.cfg.URL, reason, m.alert.DownRepeats))
 }
 
-func (m *WebMonitor) upMsg(res *probeResult, now time.Time) string {
+func (m *WebMonitor) upMsg(res *probeResult, down time.Duration) string {
 	text := fmt.Sprintf("UP: %s recovered", m.cfg.URL)
-	if m.state.DownSince != 0 {
-		down := now.Sub(time.Unix(m.state.DownSince, 0))
-		if down < 0 {
-			down = 0
-		}
+	if down > 0 {
 		text += fmt.Sprintf(" (down %s)", fmtDowntime(down))
 	}
 	return m.prefix(text)
