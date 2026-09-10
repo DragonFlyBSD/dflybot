@@ -6,3 +6,6 @@ _*
 *.old
 *.log
 opme.sh
+*.dev.toml
+*.debug.toml
+/data
