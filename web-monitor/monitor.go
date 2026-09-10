@@ -53,6 +53,7 @@ type webState struct {
 // webHistory is one line of the per-web .history JSONL file.
 type webHistory struct {
 	Timestamp time.Time `json:"ts"`
+	URL       string    `json:"url"`
 	OK        bool      `json:"ok"`
 	Status    int       `json:"status,omitempty"`
 	Duration  int64     `json:"duration_ms"`
@@ -134,9 +135,16 @@ func (m *WebMonitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 func (m *WebMonitor) poll() {
 	now := time.Now()
 	res := m.prober.Probe()
+	m.logger.Debug("probed", "url", m.cfg.URL, "result", res)
 
-	hist := webHistory{Timestamp: now.UTC(), OK: res.ok, Status: res.status,
-		Duration: res.ms, Reason: res.reason}
+	hist := webHistory{
+		Timestamp: now.UTC(),
+		URL:       m.cfg.URL,
+		OK:        res.ok,
+		Status:    res.status,
+		Duration:  res.ms,
+		Reason:    res.reason,
+	}
 	if res.cert != nil {
 		hist.DaysLeft = res.cert.daysLeft
 	}
