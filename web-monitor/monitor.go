@@ -102,14 +102,15 @@ func newWebMonitor(
 	return &WebMonitor{
 		cfg:          web,
 		prober:       prober,
-		poster:       poster,
 		alert:        alert,
-		logger:       logger,
+		poster:       poster,
+		expiringDays: days,
 		host:         host,
+		logger:       logger,
 		statePath:    dataDir + "/" + web.Name + ".state",
 		historyPath:  dataDir + "/" + web.Name + ".history",
 		history:      monitor.NewHistory(dataDir + "/" + web.Name + ".history"),
-		expiringDays: days,
+		state:        webState{Version: stateVersion},
 	}
 }
 
