@@ -85,24 +85,44 @@ func TestEntryClassification(t *testing.T) {
 }
 
 func TestHTMLText(t *testing.T) {
-	tests := []struct{ in, want string }{
-		{"", ""},
-		{"<p>Hello <b>world</b></p>", "Hello world"},
-		{"<p>a &amp; b</p>", "a & b"},
-		{"<p>line one<br/>line two</p>", "line one line two"},
+	tests := []struct {
+		in   atomContent
+		want string
+	}{
+		{atomContent{Body: ""}, ""},
+		{atomContent{Body: "<p>Hello <b>world</b></p>"}, "Hello world"},
+		{atomContent{Body: "<p>a &amp; b</p>"}, "a & b"},
+		{atomContent{Body: "<p>line one<br/>line two</p> "}, "line one line two"},
 	}
 	for _, tt := range tests {
-		if got := htmlText(tt.in, 120); got != tt.want {
-			t.Errorf("htmlText(%q) = %q, want %q", tt.in, got, tt.want)
+		if got := tt.in.bodyText(); got != tt.want {
+			t.Errorf("bodyText(%q) = %q, want %q", tt.in.Body, got, tt.want)
 		}
 	}
 }
 
+// roundTripFunc adapts a function to http.RoundTripper.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+// TestRedact verifies that fetch strips the Redmine API key from the errors
+// it returns (network errors embed the request URL, including the key).
 func TestRedact(t *testing.T) {
-	in := `Get "https://bugs.example.org/activity.atom?key=SECRET123&x=1": dial tcp`
-	got := redact(in)
+	c := newAtomClient()
+	c.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("network down")
+	})}
+
+	_, _, _, err := c.fetch("https://bugs.example.org/activity.atom?key=SECRET123&x=1", "")
+	if err == nil {
+		t.Fatal("expected a fetch error")
+	}
+	got := err.Error()
 	if strings.Contains(got, "SECRET123") || !strings.Contains(got, "key=REDACTED") {
-		t.Errorf("redact(%q) = %q", in, got)
+		t.Errorf("fetch error not redacted: %q", got)
 	}
 }
 

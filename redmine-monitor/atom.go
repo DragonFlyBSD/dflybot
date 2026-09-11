@@ -34,6 +34,14 @@ const (
 	feedLimit = 15
 )
 
+var (
+	titleRe = regexp.MustCompile(`^(.*?) #(\d+)(?: \(([^)]*)\))?: (.*)$`)
+	tagRe   = regexp.MustCompile(`(?s)<[^>]*>`)
+	// keyRe matches the value of a Redmine API key query parameter, used to
+	// strip the key from error messages (Go's network errors embed the URL).
+	keyRe = regexp.MustCompile(`(?i)([?&]key=)[^&\s"']*`)
+)
+
 // errAnubis marks a reply intercepted by Anubis: HTTP 200 with an HTML
 // challenge page instead of the Atom feed.
 var errAnubis = errors.New("blocked by Anubis")
@@ -108,6 +116,40 @@ func (e *atomEntry) issueURL() string {
 	return u
 }
 
+// bodyText renders the HTML body as one line of plain text.
+func (c *atomContent) bodyText() string {
+	if strings.TrimSpace(c.Body) == "" {
+		return ""
+	}
+
+	var s string
+	doc, err := xhtml.Parse(strings.NewReader(c.Body))
+	if err != nil {
+		s = html.UnescapeString(tagRe.ReplaceAllString(c.Body, " "))
+	} else {
+		var b strings.Builder
+		var walk func(*xhtml.Node)
+		walk = func(n *xhtml.Node) {
+			if n.Type == xhtml.TextNode {
+				b.WriteString(n.Data)
+				b.WriteByte(' ')
+			}
+			for ch := n.FirstChild; ch != nil; ch = ch.NextSibling {
+				walk(ch)
+			}
+		}
+		walk(doc)
+		s = b.String()
+	}
+
+	// Clean the whitespaces
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\t", " ")
+	s = strings.Join(strings.Fields(s), " ")
+	return s
+}
+
 // issueTitle is the parsed "<project> - <tracker> #<number> [(<status>)]:
 // <subject>" activity title.
 type issueTitle struct {
@@ -116,8 +158,6 @@ type issueTitle struct {
 	Status  string
 	Subject string
 }
-
-var titleRe = regexp.MustCompile(`^(.*?) #(\d+)(?: \(([^)]*)\))?: (.*)$`)
 
 func parseTitle(s string) (issueTitle, bool) {
 	m := titleRe.FindStringSubmatch(strings.TrimSpace(s))
@@ -153,9 +193,18 @@ func newAtomClient() *atomClient {
 // whether the feed changed (false on 304 Not Modified).  errAnubis is
 // returned when Anubis answers with its HTML challenge instead of the feed.
 func (c *atomClient) fetch(feedURL, etag string) ([]atomEntry, string, bool, error) {
+	// Remove the Redmine API key from the error message before returning
+	// it, since the request URL is embedded in network error messages.
+	redact := func(err error) error {
+		if err == nil {
+			return nil
+		}
+		return errors.New(keyRe.ReplaceAllString(err.Error(), "${1}REDACTED"))
+	}
+
 	req, err := http.NewRequest(http.MethodGet, feedURL, nil)
 	if err != nil {
-		return nil, "", false, fmt.Errorf("create request: %w", err)
+		return nil, "", false, fmt.Errorf("create request: %w", redact(err))
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "application/atom+xml, application/xml;q=0.9")
@@ -164,18 +213,17 @@ func (c *atomClient) fetch(feedURL, etag string) ([]atomEntry, string, bool, err
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, "", false, err
+		return nil, "", false, redact(err)
 	}
 	defer resp.Body.Close()
 
-	switch resp.StatusCode {
-	case http.StatusNotModified:
+	if resp.StatusCode == http.StatusNotModified {
 		return nil, etag, false, nil
-	case http.StatusOK:
-	default:
+	} else if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return nil, "", false, fmt.Errorf("http status %d: %s",
+		err = fmt.Errorf("http status %d: %s",
 			resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, "", false, err
 	}
 
 	// Anubis replies with HTTP 200 but an HTML challenge page; a content
@@ -199,43 +247,4 @@ func (c *atomClient) fetch(feedURL, etag string) ([]atomEntry, string, bool, err
 func isAnubis(body []byte) bool {
 	s := strings.ToLower(string(body))
 	return strings.Contains(s, "anubis") || strings.Contains(s, "not a bot")
-}
-
-// htmlText renders the HTML note/description of an entry as one line of
-// plain text, shortened to at most max runes.
-func htmlText(s string, max int) string {
-	if strings.TrimSpace(s) == "" {
-		return ""
-	}
-	doc, err := xhtml.Parse(strings.NewReader(s))
-	if err != nil {
-		return snippet(html.UnescapeString(stripTags(s)), max)
-	}
-	var b strings.Builder
-	var walk func(*xhtml.Node)
-	walk = func(n *xhtml.Node) {
-		if n.Type == xhtml.TextNode {
-			b.WriteString(n.Data)
-			b.WriteByte(' ')
-		}
-		for ch := n.FirstChild; ch != nil; ch = ch.NextSibling {
-			walk(ch)
-		}
-	}
-	walk(doc)
-	return snippet(b.String(), max)
-}
-
-var tagRe = regexp.MustCompile(`(?s)<[^>]*>`)
-
-func stripTags(s string) string {
-	return tagRe.ReplaceAllString(s, " ")
-}
-
-var keyRe = regexp.MustCompile(`(?i)([?&]key=)[^&\s"']*`)
-
-// redact removes the Redmine API key from a URL or error message before it
-// is logged.
-func redact(s string) string {
-	return keyRe.ReplaceAllString(s, "${1}REDACTED")
 }

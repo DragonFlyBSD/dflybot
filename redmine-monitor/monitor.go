@@ -2,7 +2,7 @@
 //
 // Redmine monitor: poll the activity Atom feed of one project, announce the
 // configured issue actions (create/comment/close/resolve/reopen/update),
-// batched per poll, and persist the per-project state and history.
+// and persist the per-project state and history.
 //
 // Announcement rules:
 //   - Issue creation is announced with the issue URL.
@@ -91,8 +91,9 @@ type activity struct {
 	at      time.Time
 }
 
-func (a *activity) verb() string {
-	return map[string]string{
+// line renders the announcement text (without the project prefix).
+func (a *activity) line() string {
+	verb := map[string]string{
 		"create":  "created",
 		"comment": "commented",
 		"close":   "closed",
@@ -100,10 +101,7 @@ func (a *activity) verb() string {
 		"reopen":  "reopened",
 		"update":  "updated",
 	}[a.action]
-}
 
-// line renders the announcement text (without the project prefix).
-func (a *activity) line() string {
 	head := fmt.Sprintf("issue #%d", a.number)
 	detail := a.subject
 	if a.tracker != "" {
@@ -112,7 +110,7 @@ func (a *activity) line() string {
 	if detail != "" {
 		head += " (" + detail + ")"
 	}
-	head += " " + a.verb() + " by " + a.actor
+	head += " " + verb + " by " + a.actor
 	if a.note != "" {
 		head += ": " + a.note
 	}
@@ -227,7 +225,10 @@ func NewProjectMonitor(cfg *ConfigProject, client *atomClient, poster monitor.Po
 		statePath:   filepath.Join(dataDir, cfg.Name+".state"),
 		historyPath: filepath.Join(dataDir, cfg.Name+".history"),
 		history:     monitor.NewHistory(filepath.Join(dataDir, cfg.Name+".history")),
-		state:       projState{Version: stateVersion, Issues: make(map[string]*issueState)},
+		state: projState{
+			Version: stateVersion,
+			Issues:  make(map[string]*issueState),
+		},
 	}
 }
 
@@ -263,20 +264,15 @@ func (m *ProjectMonitor) poll() {
 			m.handleAnubis(now)
 			return
 		}
-		m.logger.Warn("feed fetch failed", "error", redact(err.Error()))
+		m.logger.Warn("feed fetch failed", "error", err)
 		return
 	}
 
 	// Any successful fetch ends an Anubis block streak.
-	resetAnubis := m.state.AnubisStreak != 0 || m.state.AnubisWarned
-	if resetAnubis {
-		m.state.AnubisStreak = 0
-		m.state.AnubisWarned = false
-	}
+	m.state.AnubisStreak = 0
+	m.state.AnubisWarned = false
 	if !modified {
-		if resetAnubis {
-			m.saveState()
-		}
+		m.saveState()
 		return
 	}
 
@@ -312,7 +308,12 @@ func (m *ProjectMonitor) poll() {
 		if !ok {
 			continue
 		}
-		m.remember(a)
+		m.remember(issueTitle{
+			Tracker: a.tracker,
+			Number:  a.number,
+			Status:  a.status,
+			Subject: a.subject,
+		})
 		if actionWanted(a.action, m.cfg.Actions) {
 			acts = append(acts, *a)
 		}
@@ -367,17 +368,20 @@ func (m *ProjectMonitor) seed(entries []atomEntry, etag string, now time.Time) {
 		m.logger.Debug("seeded empty feed")
 		return
 	}
+
 	var maxT time.Time
-	for i := range entries {
-		m.rememberEntry(&entries[i])
-		if t := entries[i].time(); t.After(maxT) {
+	for _, e := range entries {
+		if it, ok := parseTitle(e.Title); ok {
+			m.remember(it)
+		}
+		if t := e.time(); t.After(maxT) {
 			maxT = t
 		}
 	}
 	var ids []string
-	for i := range entries {
-		if entries[i].time().Equal(maxT) {
-			ids = append(ids, entries[i].ID)
+	for _, e := range entries {
+		if e.time().Equal(maxT) {
+			ids = append(ids, e.ID)
 		}
 	}
 	m.state.setLast(maxT, ids)
@@ -415,7 +419,7 @@ func (m *ProjectMonitor) classify(e *atomEntry) (*activity, bool) {
 	}
 
 	prev := m.state.Issues[strconv.FormatInt(it.Number, 10)]
-	note := htmlText(e.Content.Body, noteMax)
+	note := e.Content.bodyText()
 
 	action := ""
 	status := it.Status
@@ -450,7 +454,7 @@ func (m *ProjectMonitor) classify(e *atomEntry) (*activity, bool) {
 		actor:   strings.TrimSpace(e.Author.Name),
 		tracker: it.Tracker,
 		subject: snippet(it.Subject, subjectMax),
-		note:    note,
+		note:    snippet(note, noteMax),
 		status:  status,
 		url:     e.issueURL(),
 		entryID: e.ID,
@@ -458,28 +462,9 @@ func (m *ProjectMonitor) classify(e *atomEntry) (*activity, bool) {
 	}, true
 }
 
-// rememberEntry updates the per-issue state from a feed entry (seeding).
-func (m *ProjectMonitor) rememberEntry(e *atomEntry) {
-	it, ok := parseTitle(e.Title)
-	if !ok {
-		return
-	}
-	m.rememberRaw(it)
-}
-
-// remember updates the per-issue state from a classified activity.
-func (m *ProjectMonitor) remember(a *activity) {
-	m.rememberRaw(issueTitle{
-		Tracker: a.tracker,
-		Number:  a.number,
-		Status:  a.status,
-		Subject: a.subject,
-	})
-}
-
 // rememberRaw stores the last-known tracker/subject/status of an issue.  An
 // empty status (e.g. a comment) leaves the previous status untouched.
-func (m *ProjectMonitor) rememberRaw(it issueTitle) {
+func (m *ProjectMonitor) remember(it issueTitle) {
 	key := strconv.FormatInt(it.Number, 10)
 	st := m.state.Issues[key]
 	if st == nil {
