@@ -5,6 +5,7 @@ all: dflybot
 all: git-monitor
 all: github-monitor
 all: jenkins-monitor
+all: redmine-monitor
 all: web-monitor
 
 .PHONY: dflybot
@@ -20,16 +21,20 @@ dflybot:
 
 .PHONY: git-monitor
 git-monitor:
-	make -C git-monitor
+	make -C $@
 
 .PHONY: github-monitor
 github-monitor:
-	make -C github-monitor
+	make -C $@
 
 .PHONY: jenkins-monitor
 jenkins-monitor:
-	make -C jenkins-monitor
+	make -C $@
+
+.PHONY: redmine-monitor
+redmine-monitor:
+	make -C $@
 
 .PHONY: web-monitor
 web-monitor:
-	make -C web-monitor
+	make -C $@

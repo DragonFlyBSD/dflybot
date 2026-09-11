@@ -31,6 +31,8 @@ announces events through dflybot's webhook.  They share the `monitor/` module
 - **github-monitor** — polls the GitHub events API and announces the
   configured issue and pull request activity (create/comment/close/merge/
   update/reopen).
+- **jeinks-monitor** — polls the Redmine (DragonFly's bugtracker) activity feed
+  and announces the bug reports and updates.
 - **web-monitor** — probes web services and announces site
   failures/recoveries (with hysteresis) and expiring/expired TLS
   certificates.
