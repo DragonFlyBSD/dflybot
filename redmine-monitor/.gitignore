@@ -1,0 +1,3 @@
+/redmine-monitor
+/redmine-monitor.*
+!redmine-monitor.toml

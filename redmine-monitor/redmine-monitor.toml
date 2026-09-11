@@ -1,0 +1,33 @@
+# Logger level: debug, info, warn, error
+log_level = "info"
+
+# Work directory to hold the per-project state and history files.
+# NOTE: Must end with a slash (/).
+data_dir = "./data/redmine/"
+
+[webhook]
+# Webhook URL
+url = "http://127.0.0.1:2018/webhook"
+# Request method
+method = "POST"
+# Bearer token to authenticate
+token = "???"
+# Name to identify this tool
+from = "redmine-monitor"
+# Target to announce the messages
+target = "#dragonflybsd"
+
+# List of Redmine projects to monitor.
+[[projects]]
+# Whether enabled?
+enabled = true
+# Unique name (also names the state/history files)
+name = "dragonflybsd"
+# URL of the project activity Atom feed.
+# NOTE: The key grants access to the project; keep it private!
+feed_url = "https://bugs.dragonflybsd.org/projects/dragonfly/activity.atom?key=REPLACE_WITH_REDMINE_API_KEY"
+# Actions to announce; empty means all supported actions
+# (create, comment, close, resolve, reopen, update).
+actions = []
+# Poll interval in seconds
+interval = 60
