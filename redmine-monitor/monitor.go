@@ -211,8 +211,13 @@ type ProjectMonitor struct {
 	state projState
 }
 
-func NewProjectMonitor(cfg *ConfigProject, client *atomClient, poster monitor.Poster,
-	dataDir string, base *slog.Logger) *ProjectMonitor {
+func NewProjectMonitor(
+	cfg *ConfigProject,
+	client *atomClient,
+	poster monitor.Poster,
+	dataDir string,
+	base *slog.Logger,
+) *ProjectMonitor {
 	if base == nil {
 		base = slog.Default()
 	}

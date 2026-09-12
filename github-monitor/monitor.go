@@ -173,8 +173,13 @@ type RepoMonitor struct {
 	state repoState
 }
 
-func NewRepoMonitor(cfg *ConfigRepo, gh *githubClient, poster monitor.Poster,
-	dataDir string, base *slog.Logger) *RepoMonitor {
+func NewRepoMonitor(
+	cfg *ConfigRepo,
+	gh *githubClient,
+	poster monitor.Poster,
+	dataDir string,
+	base *slog.Logger,
+) *RepoMonitor {
 	if base == nil {
 		base = slog.Default()
 	}
