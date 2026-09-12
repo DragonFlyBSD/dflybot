@@ -440,6 +440,60 @@ func TestMonitorCommentEvent(t *testing.T) {
 	}
 }
 
+// reviewEvent builds a PullRequestReviewEvent as the Events API delivers it:
+// an abbreviated pull_request plus the review with its body.
+func reviewEvent(id, action, at, body string) string {
+	return fmt.Sprintf(`{"id":%q,"type":"PullRequestReviewEvent","created_at":%q,
+		"actor":{"login":"zoe"},"payload":{"action":%q,"review":{"id":9001,
+		"body":%q,"state":"commented",
+		"html_url":"https://github.com/o/r/pull/55#pullrequestreview-9001"},
+		"pull_request":{"number":55,"url":"https://api.github.com/repos/o/r/pulls/55"}}}`,
+		id, at, action, body)
+}
+
+// TestMonitorReviewCommentEvent covers a submitted PR review: GitHub emits
+// a redundant "updated" event for the same review besides the "created"
+// one, so the review body must be announced exactly once, like an issue
+// comment.
+func TestMonitorReviewCommentEvent(t *testing.T) {
+	stub := &eventsStub{}
+	stub.setEvents(`"e0"`, []string{openEventAt("0", "2026-09-12T05:00:00Z")})
+	ts := httptest.NewServer(stub.handler())
+	defer ts.Close()
+
+	poster := &recordPoster{}
+	m, dir := newTestMonitor(t, ts, defaultRepo(), poster)
+	m.poll() // seed
+
+	stub.setEvents(`"e1"`, []string{
+		reviewEvent("200", "created", "2026-09-12T05:57:43Z", "A bunch of minor suggestions. Thank you."),
+		reviewEvent("199", "updated", "2026-09-12T05:57:41Z", "A bunch of minor suggestions. Thank you."),
+	})
+	m.poll()
+	msgs := poster.messages()
+	if len(msgs) != 1 || !strings.Contains(msgs[0],
+		"zoe commented on PR #55: A bunch of minor suggestions. Thank you.") {
+		t.Fatalf("review messages = %v", msgs)
+	}
+	// A redelivery must not re-announce the review.
+	m.poll()
+	if got := poster.messages(); len(got) != 1 {
+		t.Fatalf("review re-announced: %v", got)
+	}
+	hist, err := os.ReadFile(filepath.Join(dir, "o", "r.history"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"kind":"PR","action":"comment"`,
+		`"url":"https://github.com/o/r/pull/55#pullrequestreview-9001"`,
+	} {
+		if !strings.Contains(string(hist), want) {
+			t.Errorf("history missing %q:\n%s", want, hist)
+		}
+	}
+}
+
 // eventsAndRefStub serves the repository events list as well as the full
 // pull request referenced by the events' payload URL, mirroring the real
 // Events API that abbreviates pull_request payloads.

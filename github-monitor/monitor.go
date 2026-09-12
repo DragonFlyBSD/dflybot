@@ -412,6 +412,28 @@ func (m *RepoMonitor) classify(e *ghEvent) (*activity, bool) {
 			url:     issue.HtmlUrl,
 			eventID: int64(e.ID),
 		}
+	case "PullRequestReviewEvent":
+		review := e.Payload.Review
+		ref := e.Payload.PR
+		// GitHub emits an "updated" event for a submitted review right
+		// before its "created" event (the pending review gains its final
+		// state/comments, then is submitted), both carrying the same
+		// review id and body.  Announce only the creation to avoid a
+		// duplicate.  A review without a body (e.g. a bare approval) has
+		// no comment to announce.
+		if review == nil || ref == nil || review.Body == "" ||
+			e.Payload.Action != "created" {
+			return nil, false
+		}
+		a = &activity{
+			kind:    activityPR,
+			action:  "comment",
+			number:  ref.Number,
+			actor:   e.Actor.Login,
+			title:   snippet(review.Body, commentMax),
+			url:     review.HtmlUrl,
+			eventID: int64(e.ID),
+		}
 	default:
 		return nil, false
 	}

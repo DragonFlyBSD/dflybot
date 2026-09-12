@@ -34,6 +34,10 @@ func eventJSONAt(typ, id, action, created string) string {
 		payload = `"action":"` + action + `","pull_request":` + pr
 	case "IssueCommentEvent":
 		payload = `"action":"created","issue":` + issue + `,"comment":{"body":"looks good"}`
+	case "PullRequestReviewEvent":
+		review := `{"id":9001,"body":"looks good","state":"commented",` +
+			`"html_url":"https://github.com/o/r/pull/200#pullrequestreview-9001"}`
+		payload = `"action":"` + action + `","review":` + review + `,"pull_request":` + pr
 	}
 	if payload == "" {
 		return ""
@@ -86,6 +90,8 @@ func TestClassify(t *testing.T) {
 		{eventJSON("PullRequestEvent", "8", "closed"), "close", true},
 		{eventJSON("PullRequestEvent", "9", "ready_for_review"), "", false},
 		{eventJSON("IssueCommentEvent", "10", "created"), "comment", true},
+		{eventJSON("PullRequestReviewEvent", "12", "created"), "comment", true},
+		{eventJSON("PullRequestReviewEvent", "13", "updated"), "", false}, // duplicate
 		{`{"type":"PushEvent","id":"11","payload":{}}`, "", false},
 	}
 	for _, tt := range tests {

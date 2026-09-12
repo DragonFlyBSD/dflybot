@@ -68,6 +68,7 @@ type ghPayload struct {
 	Issue   *ghRef     `json:"issue"`
 	PR      *ghRef     `json:"pull_request"`
 	Comment *ghComment `json:"comment"`
+	Review  *ghReview  `json:"review"`
 }
 
 // ghRef is a referenced issue or pull request.
@@ -93,6 +94,14 @@ func (r *ghRef) IsPR() bool {
 
 type ghComment struct {
 	Body string `json:"body"`
+}
+
+// ghReview is the review referenced by a PullRequestReviewEvent.
+type ghReview struct {
+	ID      int64  `json:"id"`
+	Body    string `json:"body"`
+	State   string `json:"state"`
+	HtmlUrl string `json:"html_url"`
 }
 
 type githubClient struct {
