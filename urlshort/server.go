@@ -1,0 +1,708 @@
+// Copyright (c) 2026 Aaron LI
+//
+// HTTP server: listeners, middleware chain, routing, rate limiting, and the
+// status state used by the API.
+//
+// Middleware order (outermost first): recover panic -> request ID -> host check
+// -> body limit -> rate limit -> access log -> route.
+//
+// Co-authored-by: DeepSeek-v4.1-flash (with Pi Coding Agent)
+
+package main
+
+import (
+	"container/list"
+	"context"
+	"crypto/rand"
+	"crypto/tls"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/netip"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
+	"golang.org/x/time/rate"
+)
+
+// ---------------------------------------------------------------------------
+// Certificate manager interface
+
+// CertManager supplies TLS certificates. *autocert.Manager satisfies it (see
+// tls.go); tests can substitute a fake.
+type CertManager interface {
+	GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error)
+	TLSConfig() *tls.Config
+	HTTPHandler(fallback http.Handler) http.Handler
+}
+
+// ---------------------------------------------------------------------------
+// Status state
+
+// CertInfo summarises the certificate currently served.
+type CertInfo struct {
+	Subject   string    `json:"subject"`
+	Issuer    string    `json:"issuer"`
+	NotBefore time.Time `json:"not_before"`
+	NotAfter  time.Time `json:"not_after"`
+	DaysLeft  int       `json:"days_left"`
+}
+
+// StatusState is the mutable state exposed by GET /.api/v1/status.
+type StatusState struct {
+	mu         sync.Mutex
+	startedAt  time.Time
+	cert       *CertInfo
+	prewarmOK  bool
+	prewarmAt  time.Time
+	prewarmErr string
+	lastError  string
+	lastErrAt  time.Time
+}
+
+// NewStatusState returns a status state anchored at the given start time.
+func NewStatusState(startedAt time.Time) *StatusState {
+	return &StatusState{startedAt: startedAt}
+}
+
+// StartedAt returns the process start time.
+func (s *StatusState) StartedAt() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.startedAt
+}
+
+// SetCert records the certificate metadata.
+func (s *StatusState) SetCert(c *CertInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cert = c
+}
+
+// Cert returns the recorded certificate metadata, if any.
+func (s *StatusState) Cert() *CertInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cert
+}
+
+// SetPrewarm records the startup pre-warm result.
+func (s *StatusState) SetPrewarm(ok bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prewarmOK = ok
+	s.prewarmAt = time.Now().UTC()
+	if err != nil {
+		s.prewarmErr = err.Error()
+	} else {
+		s.prewarmErr = ""
+	}
+}
+
+// Prewarm returns the pre-warm result.
+func (s *StatusState) Prewarm() (ok bool, at time.Time, errMsg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.prewarmOK, s.prewarmAt, s.prewarmErr
+}
+
+// SetError records the most recent notable error.
+func (s *StatusState) SetError(err error) {
+	if err == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastError = err.Error()
+	s.lastErrAt = time.Now().UTC()
+}
+
+// LastError returns the most recent notable error.
+func (s *StatusState) LastError() (time.Time, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastErrAt, s.lastError
+}
+
+// ---------------------------------------------------------------------------
+// Rate limiter
+
+// RateLimiter is a bounded LRU of per-key token buckets.
+type RateLimiter struct {
+	mu      sync.Mutex
+	limit   rate.Limit
+	burst   int
+	max     int
+	entries map[string]*list.Element
+	order   *list.List
+}
+
+type rateEntry struct {
+	key     string
+	limiter *rate.Limiter
+}
+
+// NewRateLimiter returns a limiter with max tracked keys.
+func NewRateLimiter(perSecond float64, burst, max int) *RateLimiter {
+	if max <= 0 {
+		max = 10000
+	}
+	return &RateLimiter{
+		limit:   rate.Limit(perSecond),
+		burst:   burst,
+		max:     max,
+		entries: make(map[string]*list.Element),
+		order:   list.New(),
+	}
+}
+
+// Allow reports whether the key may proceed now.
+func (rl *RateLimiter) Allow(key string) bool {
+	rl.mu.Lock()
+	el, ok := rl.entries[key]
+	if ok {
+		rl.order.MoveToFront(el)
+	} else {
+		if rl.order.Len() >= rl.max {
+			if back := rl.order.Back(); back != nil {
+				rl.order.Remove(back)
+				delete(rl.entries, back.Value.(*rateEntry).key)
+			}
+		}
+		el = rl.order.PushFront(&rateEntry{key: key, limiter: rate.NewLimiter(rl.limit, rl.burst)})
+		rl.entries[key] = el
+	}
+	lim := el.Value.(*rateEntry).limiter
+	rl.mu.Unlock()
+	return lim.Allow()
+}
+
+// ---------------------------------------------------------------------------
+// Server
+
+// Server wires the store, rules, auth, and logging into an HTTP service.
+type Server struct {
+	cfg    *Config
+	store  Store
+	rules  *Ruleset
+	auth   *Authenticator
+	logs   *AccessLogger
+	logger *slog.Logger
+	certs  CertManager
+	status *StatusState
+
+	redirectLimiter *RateLimiter
+	apiLimiter      *RateLimiter
+	allowedHosts    map[string]bool
+
+	mainHandler http.Handler
+	httpHandler http.Handler
+
+	maintenance *Maintenance
+
+	mu          sync.Mutex
+	listenAddrs []string
+
+	shutdownTimeout time.Duration
+	readTimeout     time.Duration
+	writeTimeout    time.Duration
+	idleTimeout     time.Duration
+}
+
+// NewServer builds the server and its handlers. certs may be nil when
+// https_port is 0.
+func NewServer(cfg *Config, store Store, rules *Ruleset, auth *Authenticator, logs *AccessLogger, certs CertManager, status *StatusState, logger *slog.Logger) *Server {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if status == nil {
+		status = NewStatusState(time.Now().UTC())
+	}
+	s := &Server{
+		cfg:             cfg,
+		store:           store,
+		rules:           rules,
+		auth:            auth,
+		logs:            logs,
+		logger:          logger,
+		certs:           certs,
+		status:          status,
+		redirectLimiter: NewRateLimiter(cfg.Access.RedirectRate, cfg.Access.RedirectBurst, 10000),
+		apiLimiter:      NewRateLimiter(cfg.Access.APIRate, cfg.Access.APIBurst, 10000),
+		allowedHosts:    make(map[string]bool),
+		shutdownTimeout: time.Duration(cfg.Server.ShutdownTimeout) * time.Second,
+		readTimeout:     time.Duration(cfg.Server.ReadTimeout) * time.Second,
+		writeTimeout:    time.Duration(cfg.Server.WriteTimeout) * time.Second,
+		idleTimeout:     time.Duration(cfg.Server.IdleTimeout) * time.Second,
+	}
+	for _, h := range cfg.AllowedHosts() {
+		s.allowedHosts[h] = true
+	}
+	s.mainHandler = s.wrap(s.routeMain)
+	s.httpHandler = s.buildHTTPHandler()
+	return s
+}
+
+// MainHandler returns the handler for normal (HTTPS or http-only) traffic.
+func (s *Server) MainHandler() http.Handler { return s.mainHandler }
+
+// HTTPHandler returns the handler for port 80 (ACME challenge + redirect).
+func (s *Server) HTTPHandler() http.Handler { return s.httpHandler }
+
+// Status exposes the status state.
+func (s *Server) Status() *StatusState { return s.status }
+
+// SetMaintenance attaches the backup maintenance state for the status endpoint.
+func (s *Server) SetMaintenance(m *Maintenance) { s.maintenance = m }
+
+// buildHTTPHandler builds the port-80 handler: ACME http-01 (when enabled)
+// with a redirect-to-HTTPS fallback.
+func (s *Server) buildHTTPHandler() http.Handler {
+	var route http.HandlerFunc = s.redirectToHTTPS
+	if s.cfg.ACME.Enabled && s.cfg.ACME.HTTP01Fallback && s.certs != nil {
+		acme := s.certs.HTTPHandler(http.HandlerFunc(s.redirectToHTTPS))
+		route = func(w http.ResponseWriter, r *http.Request) { acme.ServeHTTP(w, r) }
+	}
+	return s.wrap(route)
+}
+
+// ---------------------------------------------------------------------------
+// Middleware
+
+func (s *Server) wrap(route http.HandlerFunc) http.Handler {
+	var h http.Handler = route
+	h = s.accessLogMiddleware(h)
+	h = s.rateLimitMiddleware(h)
+	h = s.bodyLimitMiddleware(h)
+	h = s.hostCheckMiddleware(h)
+	h = s.requestIDMiddleware(h)
+	h = s.recoverMiddleware(h)
+	return h
+}
+
+func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				s.logger.Error("panic serving request", "panic", rec, "path", r.URL.Path)
+				s.status.SetError(fmt.Errorf("panic: %v", rec))
+				writePlainError(w, http.StatusInternalServerError, "internal server error")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+type contextKey int
+
+const (
+	requestIDKey contextKey = iota
+	accessInfoKey
+)
+
+// accessInfo is filled in by handlers for the access log.
+type accessInfo struct {
+	Type   string
+	Client string
+	Action string
+	Key    string
+	Target string
+	Rule   string
+}
+
+func accessInfoFrom(r *http.Request) *accessInfo {
+	if ai, ok := r.Context().Value(accessInfoKey).(*accessInfo); ok {
+		return ai
+	}
+	return &accessInfo{}
+}
+
+func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("X-Request-ID")
+		if id == "" || len(id) > 64 {
+			id = newRequestID()
+		}
+		w.Header().Set("X-Request-ID", id)
+		ai := &accessInfo{}
+		ctx := context.WithValue(r.Context(), requestIDKey, id)
+		ctx = context.WithValue(ctx, accessInfoKey, ai)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func newRequestID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(b[:])
+}
+
+func (s *Server) hostCheckMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodConnect {
+			writePlainError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if r.RequestURI == "*" {
+			writePlainError(w, http.StatusBadRequest, "asterisk-form request target not allowed")
+			return
+		}
+		if r.URL.IsAbs() {
+			writePlainError(w, http.StatusBadRequest, "absolute-form request target not allowed")
+			return
+		}
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		if host == "" || !s.allowedHosts[strings.ToLower(host)] {
+			writePlainError(w, http.StatusMisdirectedRequest, "misdirected request")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+const maxAPIBodyBytes = 64 << 10
+
+func (s *Server) bodyLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/.api/v1/") {
+			r.Body = http.MaxBytesReader(w, r.Body, maxAPIBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/.api/v1/") {
+			// API rate limiting is per token and happens after authentication.
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !s.redirectLimiter.Allow(sourceKey(r.RemoteAddr)) {
+			w.Header().Set("Retry-After", "1")
+			writePlainError(w, http.StatusTooManyRequests, "rate limited")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.logs == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
+		status := rec.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		ai := accessInfoFrom(r)
+		typ := ai.Type
+		if typ == "" {
+			typ = classifyAccessType(r.URL.Path)
+		}
+		id, _ := r.Context().Value(requestIDKey).(string)
+		entry := AccessEntry{
+			Timestamp:  start.UTC(),
+			Type:       typ,
+			RemoteIP:   remoteIP(r.RemoteAddr),
+			Method:     r.Method,
+			Host:       r.Host,
+			Path:       r.URL.Path,
+			Status:     status,
+			RequestID:  id,
+			UserAgent:  r.UserAgent(),
+			Referer:    r.Referer(),
+			DurationMS: float64(time.Since(start).Microseconds()) / 1000.0,
+			Bytes:      rec.bytes,
+		}
+		if ai.Client != "" {
+			entry.Client = ai.Client
+		}
+		entry.Key, entry.Target, entry.Rule, entry.Action = ai.Key, ai.Target, ai.Rule, ai.Action
+		s.logs.Log(entry)
+	})
+}
+
+func classifyAccessType(path string) string {
+	switch {
+	case strings.HasPrefix(path, "/.well-known/acme-challenge/"):
+		return AccessTypeACME
+	case strings.HasPrefix(path, "/.api/"):
+		return AccessTypeAPI
+	default:
+		return AccessTypeRedirect
+	}
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int64
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	if r.status == 0 {
+		r.status = code
+	}
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	n, err := r.ResponseWriter.Write(b)
+	r.bytes += int64(n)
+	return n, err
+}
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+// ---------------------------------------------------------------------------
+// Routing
+
+func (s *Server) routeMain(w http.ResponseWriter, r *http.Request) {
+	p := r.URL.Path
+	switch {
+	case strings.HasPrefix(p, "/.api/v1/"):
+		s.handleAPI(w, r)
+	case strings.HasPrefix(p, "/.well-known/"):
+		writePlainError(w, http.StatusNotFound, "404 page not found")
+	case p == "/robots.txt":
+		if !requireGetHead(w, r) {
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write([]byte("User-agent: *\nDisallow: /\n"))
+	case p == "/favicon.ico":
+		if !requireGetHead(w, r) {
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		s.handleRedirect(w, r)
+	}
+}
+
+// redirectToHTTPS redirects a validated host and path to HTTPS (port 80).
+func (s *Server) redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
+	writeSecurityHeaders(w)
+	w.Header().Set("Cache-Control", "no-store")
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if s.cfg.Server.HTTPSPort != 443 {
+		host = net.JoinHostPort(host, strconv.Itoa(s.cfg.Server.HTTPSPort))
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	loc := "https://" + host + r.RequestURI
+	w.Header().Set("Location", loc)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusPermanentRedirect)
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+
+// remoteIP extracts the client IP from RemoteAddr, ignoring any forwarding
+// headers (C13).
+func remoteIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		return ip.Unmap().String()
+	}
+	return host
+}
+
+// sourceKey buckets a source for rate limiting: IPv4 /32 and IPv6 /64.
+func sourceKey(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return host
+	}
+	ip = ip.Unmap()
+	if ip.Is4() {
+		return ip.String()
+	}
+	p, err := ip.Prefix(64)
+	if err != nil {
+		return ip.String()
+	}
+	return p.String()
+}
+
+func writeSecurityHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Referrer-Policy", "no-referrer")
+}
+
+// writePlainError writes a non-JSON error with the security headers required
+// on every error response (section 14).
+func writePlainError(w http.ResponseWriter, status int, msg string) {
+	writeSecurityHeaders(w)
+	w.Header().Set("Cache-Control", "no-store")
+	http.Error(w, msg, status)
+}
+
+// requireGetHead enforces the GET/HEAD-only rule for static paths.
+func requireGetHead(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		return true
+	}
+	w.Header().Set("Allow", "GET, HEAD")
+	writePlainError(w, http.StatusMethodNotAllowed, "method not allowed")
+	return false
+}
+
+// ---------------------------------------------------------------------------
+// Listeners and serving
+
+// listenTCP binds one TCP listener, setting IPV6_V6ONLY on IPv6 sockets so the
+// IPv4 and IPv6 sockets can coexist (C6).
+func listenTCP(ctx context.Context, addr string, port int) (net.Listener, error) {
+	lc := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			var setErr error
+			if err := c.Control(func(fd uintptr) {
+				if strings.Contains(addr, ":") {
+					setErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 1)
+				}
+			}); err != nil {
+				return err
+			}
+			return setErr
+		},
+	}
+	return lc.Listen(ctx, "tcp", net.JoinHostPort(addr, strconv.Itoa(port)))
+}
+
+// Serve binds all configured listeners and blocks until ctx is canceled or a
+// fatal serve error occurs.
+func (s *Server) Serve(ctx context.Context) error {
+	var servers []*http.Server
+	errCh := make(chan error, 16)
+
+	newServer := func(h http.Handler) *http.Server {
+		return &http.Server{
+			Handler:        h,
+			ReadTimeout:    s.readTimeout,
+			WriteTimeout:   s.writeTimeout,
+			IdleTimeout:    s.idleTimeout,
+			MaxHeaderBytes: s.cfg.Server.MaxHeaderBytes,
+			ErrorLog:       slog.NewLogLogger(s.logger.Handler(), slog.LevelWarn),
+		}
+	}
+
+	add := func(ln net.Listener, srv *http.Server, desc string) {
+		servers = append(servers, srv)
+		s.mu.Lock()
+		s.listenAddrs = append(s.listenAddrs, desc)
+		s.mu.Unlock()
+		go func() {
+			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("%s: %w", desc, err)
+			}
+		}()
+	}
+
+	closeAll := func() {
+		for _, srv := range servers {
+			_ = srv.Close()
+		}
+	}
+
+	for _, addr := range s.cfg.Server.ListenAddresses {
+		if s.cfg.Server.HTTPPort > 0 {
+			ln, err := listenTCP(ctx, addr, s.cfg.Server.HTTPPort)
+			if err != nil {
+				closeAll()
+				return fmt.Errorf("listen http %s:%d: %w", addr, s.cfg.Server.HTTPPort, err)
+			}
+			h := s.mainHandler
+			if s.cfg.Server.HTTPSPort > 0 {
+				h = s.httpHandler
+			}
+			add(ln, newServer(h), ln.Addr().String())
+		}
+		if s.cfg.Server.HTTPSPort > 0 {
+			if s.certs == nil {
+				closeAll()
+				return errors.New("https_port is set but no certificate manager is configured")
+			}
+			ln, err := listenTCP(ctx, addr, s.cfg.Server.HTTPSPort)
+			if err != nil {
+				closeAll()
+				return fmt.Errorf("listen https %s:%d: %w", addr, s.cfg.Server.HTTPSPort, err)
+			}
+			add(tls.NewListener(ln, s.certs.TLSConfig()), newServer(s.mainHandler), ln.Addr().String())
+		}
+	}
+	if len(servers) == 0 {
+		return errors.New("no listeners configured")
+	}
+
+	select {
+	case <-ctx.Done():
+		return s.shutdown(servers)
+	case err := <-errCh:
+		_ = s.shutdown(servers)
+		return err
+	}
+}
+
+func (s *Server) shutdown(servers []*http.Server) error {
+	timeout := s.shutdownTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var firstErr error
+	for _, srv := range servers {
+		if err := srv.Shutdown(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// Listeners returns the descriptions of the bound listeners.
+func (s *Server) Listeners() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.listenAddrs...)
+}

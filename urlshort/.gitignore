@@ -1,0 +1,4 @@
+/urlshort
+/urlshort.*
+!urlshort.toml
+/data/

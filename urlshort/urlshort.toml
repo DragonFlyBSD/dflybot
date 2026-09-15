@@ -1,0 +1,151 @@
+# urlshort sample configuration.
+#
+# Replace every "???" token before use and keep this file mode 0600: it
+# contains plaintext secrets.
+
+# Application log level: debug, info, warn, error
+log_level = "info"
+
+# Storage root. Must end with a slash.
+# Contains: links.db, acme/, backup/, logs/access-YYYY-MM-DD.jsonl
+data_dir = "./data/"
+
+[server]
+# Listen addresses (IP literals or hostnames). IPv4 and IPv6 are bound as
+# separate sockets.
+listen_addresses = ["0.0.0.0", "::"]
+# 0 disables the listener. At least one of http_port/https_port must be > 0.
+http_port  = 80
+https_port = 443
+
+# Mandatory. Scheme + host only. No path, query, fragment, userinfo, or
+# trailing slash. ASCII/punycode host.
+public_url = "https://example.com"
+
+# Extra hostnames accepted for redirects. If ACME is enabled they are also
+# added to autocert's HostPolicy. The generated short_url always uses
+# public_url.
+# extra_hosts = ["www.example.com"]
+
+# Manual TLS certificate and key. Required when acme.enabled = false and
+# https_port > 0. Must be absent when acme.enabled = true.
+# cert_file = "/etc/ssl/example.com/fullchain.pem"
+# key_file  = "/etc/ssl/example.com/privkey.pem"
+
+# HTTP server timeouts, in seconds. read_timeout and write_timeout also bound
+# the TLS handshake.
+shutdown_timeout = 10
+read_timeout     = 30
+write_timeout    = 30
+idle_timeout     = 60
+# Soft request-header limit. Go adds 4096 bytes of bufio slop.
+max_header_bytes = 8192
+
+[acme]
+enabled = true
+# Let's Encrypt production. Staging:
+# https://acme-staging-v02.api.letsencrypt.org/directory
+directory_url = "https://acme-v02.api.letsencrypt.org/directory"
+
+# Optional pre-existing ACME account key (PEM; EC P-256 preferred, RSA also
+# accepted). When set, autocert uses it and never generates or overwrites
+# one. When unset, autocert generates an ECDSA P-256 key and stores it in
+# cache_dir under the name "acme_account+key".
+# account_file = "/etc/ssl/example.com/acme-account.pem"
+
+# Contact address for CA expiry/problem notices. Optional but recommended.
+email = "admin@example.com"
+accept_tos = true
+
+# Certificate/account cache. Default: <data_dir>/acme. Must persist and be
+# backed up; losing it without account_file creates a new ACME account and
+# can hit CA rate limits.
+cache_dir = ""
+
+# Renew this many days before expiry. Must be > 0 and < 90.
+renew_before_days = 30
+
+# Also allow the http-01 challenge as a fallback. Requires http_port == 80.
+http01_fallback = false
+
+# Timeout for each ACME HTTP request (not the whole issuance order).
+issue_timeout = 60
+
+[access]
+# Per-source-IP limits for redirects (IPv4 /32, IPv6 /64), and per-token
+# limits for the API. Allowed rates are in requests/second.
+redirect_rate  = 20
+redirect_burst = 40
+api_rate       = 5
+api_burst      = 10
+
+[access_log]
+retention_days = 30
+flush_interval = 5      # in seconds
+
+[backup]
+# Daily compacted backup of links.db.
+enabled = true
+# Default: <data_dir>/backup/. Must end with "/".
+dir = ""
+# UTC hour [0,23] at which the daily job runs.
+hour_utc = 3
+# On startup, always produce a startup backup.
+run_on_start = true
+# Delete backups older than this many days (0 disables deletion).
+retention_days = 30
+# Optional cap on the number of backup files (0 = unlimited); bounds a
+# restart loop that produces many same-day startup backups.
+retention_count = 3
+# Compaction transaction size limit in bytes; bounds memory during compaction.
+compact_tx_max_bytes = 1048576
+
+# Short-name substitutions usable as {{ abbrev .group }} in rule templates.
+# Unknown names are lowercased and passed through unchanged.
+[abbreviations]
+DragonFlyBSD = "dfbsd"
+DeltaPorts   = "dp"
+dragonfly    = "d"
+
+# Ordered mapping rules. First full-string match wins.
+[[rules]]
+name  = "github-pr"
+match = '''^https://github\.com/(?P<org>[^/]+)/(?P<repo>[^/]+)/pull/(?P<num>[0-9]+)$'''
+key   = "/gh/{{ abbrev .org }}/p/{{ .num }}"
+
+[[rules]]
+name  = "github-issue"
+match = '''^https://github\.com/(?P<org>[^/]+)/(?P<repo>[^/]+)/issues/(?P<num>[0-9]+)$'''
+key   = "/gh/{{ abbrev .org }}/i/{{ .num }}"
+
+[[rules]]
+name     = "gitweb-commit"
+match    = '''^https://gitweb\.dragonflybsd\.org/(?P<repo>[^/]+?)(?:\.git)?/(?:commit|commitdiff)/(?P<sha>[0-9a-f]{40})$'''
+key      = "/g/{{ abbrev .repo }}/{{ .sha }}"
+hash        = "sha"   # capture group to auto-extend for uniqueness
+hash_minlen = 8       # minimum prefix length (>= 4)
+
+# API clients. Each client must own at least one namespace unless admin.
+# Namespaces are listed in priority order; the first one is used as the prefix
+# for random fallback keys generated for unmatched targets.
+[[clients]]
+enabled    = true
+name       = "git-monitor"
+namespaces = ["/g/"]
+# Plaintext tokens (min 32 chars) and/or SHA-256 hex digests (64 chars).
+# Both lists are optional, but at least one entry across both is required.
+tokens        = ["???"]
+tokens_sha256 = []
+
+[[clients]]
+enabled    = true
+name       = "github-monitor"
+namespaces = ["/gh/"]
+tokens        = ["???"]
+tokens_sha256 = []
+
+[[clients]]
+enabled = true
+name    = "admin"
+admin   = true
+tokens  = ["???"]
