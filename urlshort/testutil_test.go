@@ -102,7 +102,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status := NewStatusState(time.Now().UTC())
+	status := NewStatusState()
 	cert := makeTestCert(t, "example.com")
 	certs := &recordingCertManager{inner: &manualCertManager{cert: &cert}, status: status, logger: slog.Default()}
 	srv := NewServer(cfg, store, rules, auth, logs, certs, status, nil)
@@ -135,7 +135,7 @@ func (e *testEnv) request(method, target, token string, body any, handler http.H
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if handler == nil {
-		handler = e.srv.MainHandler()
+		handler = e.srv.mainHandler
 	}
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)

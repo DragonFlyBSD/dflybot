@@ -58,7 +58,7 @@ func (f *fakeCertManager) TLSConfig() *tls.Config                  { return &tls
 func (f *fakeCertManager) HTTPHandler(h http.Handler) http.Handler { return h }
 
 func TestRecordingCertManager(t *testing.T) {
-	status := NewStatusState(time.Now().UTC())
+	status := NewStatusState()
 	inner := &fakeCertManager{cert: makeTestCert(t, "example.com")}
 	m := &recordingCertManager{inner: inner, status: status, logger: slog.Default()}
 
@@ -84,7 +84,7 @@ func TestRecordingCertManager(t *testing.T) {
 }
 
 func TestPrewarm(t *testing.T) {
-	status := NewStatusState(time.Now().UTC())
+	status := NewStatusState()
 	inner := &fakeCertManager{cert: makeTestCert(t, "example.com")}
 	m := &recordingCertManager{inner: inner, status: status, logger: slog.Default()}
 
@@ -135,7 +135,7 @@ func TestManualCertManager(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	status := NewStatusState(time.Now().UTC())
+	status := NewStatusState()
 	m, err := buildCertManager(cfg, status, slog.Default())
 	if err != nil {
 		t.Fatal(err)
@@ -154,7 +154,7 @@ func TestManualCertManager(t *testing.T) {
 func TestBuildCertManagerDisabled(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Server.HTTPSPort = 0
-	m, err := buildCertManager(cfg, NewStatusState(time.Now()), slog.Default())
+	m, err := buildCertManager(cfg, NewStatusState(), slog.Default())
 	if err != nil || m != nil {
 		t.Fatalf("expected nil manager, got %v err=%v", m, err)
 	}

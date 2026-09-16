@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,8 +69,8 @@ type StatusState struct {
 }
 
 // NewStatusState returns a status state anchored at the given start time.
-func NewStatusState(startedAt time.Time) *StatusState {
-	return &StatusState{startedAt: startedAt}
+func NewStatusState() *StatusState {
+	return &StatusState{startedAt: time.Now().UTC()}
 }
 
 // StartedAt returns the process start time.
@@ -176,7 +177,10 @@ func (rl *RateLimiter) Allow(key string) bool {
 				delete(rl.entries, back.Value.(*rateEntry).key)
 			}
 		}
-		el = rl.order.PushFront(&rateEntry{key: key, limiter: rate.NewLimiter(rl.limit, rl.burst)})
+		el = rl.order.PushFront(&rateEntry{
+			key:     key,
+			limiter: rate.NewLimiter(rl.limit, rl.burst),
+		})
 		rl.entries[key] = el
 	}
 	lim := el.Value.(*rateEntry).limiter
@@ -189,23 +193,24 @@ func (rl *RateLimiter) Allow(key string) bool {
 
 // Server wires the store, rules, auth, and logging into an HTTP service.
 type Server struct {
-	cfg    *Config
-	store  Store
-	rules  *Ruleset
-	auth   *Authenticator
-	logs   *AccessLogger
-	logger *slog.Logger
-	certs  CertManager
-	status *StatusState
+	cfg         *Config
+	store       Store
+	rules       *Ruleset
+	auth        *Authenticator
+	logs        *AccessLogger
+	logger      *slog.Logger
+	certs       CertManager
+	status      *StatusState
+	maintenance *Maintenance
 
 	redirectLimiter *RateLimiter
 	apiLimiter      *RateLimiter
 	allowedHosts    map[string]bool
 
+	// Handler for normal (HTTPS or http-only) traffic.
 	mainHandler http.Handler
+	// Handler for port 80 traffic (i.e., ACME challenge + HTTPS redirect)
 	httpHandler http.Handler
-
-	maintenance *Maintenance
 
 	mu          sync.Mutex
 	listenAddrs []string
@@ -223,7 +228,7 @@ func NewServer(cfg *Config, store Store, rules *Ruleset, auth *Authenticator, lo
 		logger = slog.Default()
 	}
 	if status == nil {
-		status = NewStatusState(time.Now().UTC())
+		status = NewStatusState()
 	}
 	s := &Server{
 		cfg:             cfg,
@@ -245,22 +250,15 @@ func NewServer(cfg *Config, store Store, rules *Ruleset, auth *Authenticator, lo
 	for _, h := range cfg.AllowedHosts() {
 		s.allowedHosts[h] = true
 	}
-	s.mainHandler = s.wrap(s.routeMain)
+	s.mainHandler = s.wrap(http.HandlerFunc(s.routeMain))
 	s.httpHandler = s.buildHTTPHandler()
 	return s
 }
 
-// MainHandler returns the handler for normal (HTTPS or http-only) traffic.
-func (s *Server) MainHandler() http.Handler { return s.mainHandler }
-
-// HTTPHandler returns the handler for port 80 (ACME challenge + redirect).
-func (s *Server) HTTPHandler() http.Handler { return s.httpHandler }
-
-// Status exposes the status state.
-func (s *Server) Status() *StatusState { return s.status }
-
 // SetMaintenance attaches the backup maintenance state for the status endpoint.
-func (s *Server) SetMaintenance(m *Maintenance) { s.maintenance = m }
+func (s *Server) SetMaintenance(m *Maintenance) {
+	s.maintenance = m
+}
 
 // newServer builds an http.Server with the configured timeouts. HTTP/2 is
 // configured by the caller.
@@ -275,46 +273,31 @@ func (s *Server) newServer(h http.Handler) *http.Server {
 	}
 }
 
-// tlsConfig returns the TLS config for HTTPS listeners. It applies
-// server.http2_enabled to the ALPN list; the TLS config returned by the
-// certificate manager is freshly built/cloned per call, so mutating NextProtos
-// is safe.
-func (s *Server) tlsConfig() *tls.Config {
-	cfg := s.certs.TLSConfig()
-	if s.cfg.Server.HTTP2Enabled {
-		if !containsString(cfg.NextProtos, "h2") {
-			cfg.NextProtos = append([]string{"h2"}, cfg.NextProtos...)
-		}
-		return cfg
-	}
-	kept := cfg.NextProtos[:0]
-	for _, p := range cfg.NextProtos {
-		if p != "h2" {
-			kept = append(kept, p)
-		}
-	}
-	cfg.NextProtos = kept
-	return cfg
-}
-
 // httpsServer builds the http.Server and *tls.Config for an HTTPS listener. When
 // http2_enabled is false, a non-nil TLSNextProto without an "h2" entry disables
 // the automatic HTTP/2 configuration in net/http.
 func (s *Server) httpsServer() (*http.Server, *tls.Config) {
 	srv := s.newServer(s.mainHandler)
-	if !s.cfg.Server.HTTP2Enabled {
+	cfg := s.certs.TLSConfig()
+	if s.cfg.Server.HTTP2Enabled {
+		if !slices.Contains(cfg.NextProtos, "h2") {
+			cfg.NextProtos = append([]string{"h2"}, cfg.NextProtos...)
+		}
+	} else {
 		srv.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){}
+		if i := slices.Index(cfg.NextProtos, "h2"); i >= 0 {
+			cfg.NextProtos = slices.Delete(cfg.NextProtos, i, i+1)
+		}
 	}
-	return srv, s.tlsConfig()
+	return srv, cfg
 }
 
 // buildHTTPHandler builds the port-80 handler: ACME http-01 (when enabled)
 // with a redirect-to-HTTPS fallback.
 func (s *Server) buildHTTPHandler() http.Handler {
-	var route http.HandlerFunc = s.redirectToHTTPS
+	var route http.Handler = http.HandlerFunc(s.redirectToHTTPS)
 	if s.cfg.ACME.Enabled && s.cfg.ACME.HTTP01Fallback && s.certs != nil {
-		acme := s.certs.HTTPHandler(http.HandlerFunc(s.redirectToHTTPS))
-		route = func(w http.ResponseWriter, r *http.Request) { acme.ServeHTTP(w, r) }
+		route = s.certs.HTTPHandler(route)
 	}
 	return s.wrap(route)
 }
@@ -322,7 +305,7 @@ func (s *Server) buildHTTPHandler() http.Handler {
 // ---------------------------------------------------------------------------
 // Middleware
 
-func (s *Server) wrap(route http.HandlerFunc) http.Handler {
+func (s *Server) wrap(route http.Handler) http.Handler {
 	var h http.Handler = route
 	h = s.accessLogMiddleware(h)
 	h = s.rateLimitMiddleware(h)
@@ -337,7 +320,8 @@ func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				s.logger.Error("panic serving request", "panic", rec, "path", r.URL.Path)
+				s.logger.Error("panic serving request", "panic", rec, "path", r.URL.Path,
+					"method", r.Method, "header", r.Header)
 				s.status.SetError(fmt.Errorf("panic: %v", rec))
 				writePlainError(w, http.StatusInternalServerError, "internal server error")
 			}
@@ -418,7 +402,7 @@ func (s *Server) hostCheckMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-const maxAPIBodyBytes = 64 << 10
+const maxAPIBodyBytes = 64 * 1024 // 64KB
 
 func (s *Server) bodyLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -554,7 +538,7 @@ func (s *Server) routeMain(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// redirectToHTTPS redirects a validated host and path to HTTPS (port 80).
+// redirectToHTTPS redirects a validated host and path to HTTPS.
 func (s *Server) redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
 	writeSecurityHeaders(w)
 	w.Header().Set("Cache-Control", "no-store")

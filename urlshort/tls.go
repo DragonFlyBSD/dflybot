@@ -89,7 +89,9 @@ func (m *manualCertManager) TLSConfig() *tls.Config {
 	}
 }
 
-func (m *manualCertManager) HTTPHandler(fallback http.Handler) http.Handler { return fallback }
+func (m *manualCertManager) HTTPHandler(fallback http.Handler) http.Handler {
+	return fallback
+}
 
 // recordingCertManager wraps another manager and records the certificate the
 // service actually serves, ignoring challenge handshakes (C17).
@@ -107,12 +109,16 @@ func (m *recordingCertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.
 		m.status.SetError(err)
 		return nil, err
 	}
-	if !isChallengeHello(hello) {
-		if info, err := certInfo(cert); err != nil {
-			m.logger.Warn("could not parse served certificate", "error", err)
-		} else {
-			m.status.SetCert(info)
-		}
+
+	// Skip recording if the handshake is an ACME tls-alpn-01 challenge.
+	if hello != nil && len(hello.SupportedProtos) == 1 && hello.SupportedProtos[0] == acme.ALPNProto {
+		return cert, nil
+	}
+
+	if info, err := certInfo(cert); err != nil {
+		m.logger.Warn("could not parse served certificate", "error", err)
+	} else {
+		m.status.SetCert(info)
 	}
 	return cert, nil
 }
@@ -127,12 +133,6 @@ func (m *recordingCertManager) TLSConfig() *tls.Config {
 
 func (m *recordingCertManager) HTTPHandler(fallback http.Handler) http.Handler {
 	return m.inner.HTTPHandler(fallback)
-}
-
-// isChallengeHello reports whether the handshake is an ACME tls-alpn-01
-// challenge, which must not be recorded.
-func isChallengeHello(hello *tls.ClientHelloInfo) bool {
-	return hello != nil && len(hello.SupportedProtos) == 1 && hello.SupportedProtos[0] == acme.ALPNProto
 }
 
 // certInfo extracts display metadata from the leaf certificate.
@@ -168,8 +168,8 @@ func prewarmHello(domain string) *tls.ClientHelloInfo {
 
 // prewarm requests the certificate at startup in a goroutine. It never blocks
 // startup and never fails the process (C18).
-func prewarm(certs CertManager, domain string, status *StatusState, logger *slog.Logger) {
-	if certs == nil || domain == "" {
+func prewarm(m CertManager, domain string, status *StatusState, logger *slog.Logger) {
+	if m == nil || domain == "" {
 		return
 	}
 	go func() {
@@ -179,7 +179,7 @@ func prewarm(certs CertManager, domain string, status *StatusState, logger *slog
 				status.SetPrewarm(false, fmt.Errorf("panic: %v", rec))
 			}
 		}()
-		if _, err := certs.GetCertificate(prewarmHello(domain)); err != nil {
+		if _, err := m.GetCertificate(prewarmHello(domain)); err != nil {
 			logger.Warn("certificate pre-warm failed", "domain", domain, "error", err)
 			status.SetPrewarm(false, err)
 			return

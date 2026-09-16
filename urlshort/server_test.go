@@ -17,7 +17,7 @@ func TestHostValidation(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/g/x", nil)
 	req.Host = "evil.example.net"
 	rec := httptest.NewRecorder()
-	e.srv.MainHandler().ServeHTTP(rec, req)
+	e.srv.mainHandler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMisdirectedRequest {
 		t.Fatalf("host mismatch = %d, want 421", rec.Code)
 	}
@@ -26,7 +26,7 @@ func TestHostValidation(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/nonexistent", nil)
 	req.Host = "www.example.com"
 	rec = httptest.NewRecorder()
-	e.srv.MainHandler().ServeHTTP(rec, req)
+	e.srv.mainHandler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("extra host = %d, want 404", rec.Code)
 	}
@@ -97,7 +97,7 @@ func TestAbsoluteFormRejected(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/g/x", nil)
 	req.Host = "example.com"
 	rec := httptest.NewRecorder()
-	e.srv.MainHandler().ServeHTTP(rec, req)
+	e.srv.mainHandler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("absolute-form = %d, want 400", rec.Code)
 	}
@@ -132,7 +132,7 @@ func TestRateLimit(t *testing.T) {
 
 func TestHTTPToHTTPSRedirect(t *testing.T) {
 	e := newTestEnv(t)
-	rec := e.request(http.MethodGet, "/g/t", "", nil, e.srv.HTTPHandler())
+	rec := e.request(http.MethodGet, "/g/t", "", nil, e.srv.httpHandler)
 	if rec.Code != http.StatusPermanentRedirect {
 		t.Fatalf("http redirect = %d, want 308", rec.Code)
 	}
@@ -143,7 +143,7 @@ func TestHTTPToHTTPSRedirect(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/g/t", nil)
 	req.Host = "www.example.com"
 	rec = httptest.NewRecorder()
-	e.srv.HTTPHandler().ServeHTTP(rec, req)
+	e.srv.httpHandler.ServeHTTP(rec, req)
 	if loc := rec.Header().Get("Location"); loc != "https://www.example.com/g/t" {
 		t.Fatalf("extra host location = %q", loc)
 	}

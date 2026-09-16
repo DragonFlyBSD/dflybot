@@ -55,7 +55,8 @@ func run(configPath string) error {
 	}
 	defer logs.Close()
 
-	store, err := OpenBoltStore(filepath.Join(cfg.DataDir, "links.db"), cfg.Backup.CompactTxMaxBytes)
+	store, err := OpenBoltStore(filepath.Join(cfg.DataDir, "links.db"),
+		cfg.Backup.CompactTxMaxBytes)
 	if err != nil {
 		return err
 	}
@@ -70,7 +71,7 @@ func run(configPath string) error {
 		return err
 	}
 
-	status := NewStatusState(time.Now().UTC())
+	status := NewStatusState()
 	certs, err := buildCertManager(cfg, status, logger)
 	if err != nil {
 		return err

@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"text/template"
 
@@ -491,7 +492,7 @@ func (c *Config) validateRules(v *validator) {
 			v.addf("%s: key template: %v", ctx, err)
 		}
 		if r.Hash != "" {
-			if !containsString(re.SubexpNames(), r.Hash) {
+			if !slices.Contains(re.SubexpNames(), r.Hash) {
 				v.addf("%s: hash %q does not name a capture group", ctx, r.Hash)
 			}
 			if r.HashMinlen < 4 {
@@ -597,15 +598,6 @@ func isASCII(s string) bool {
 		}
 	}
 	return true
-}
-
-func containsString(list []string, want string) bool {
-	for _, s := range list {
-		if s == want {
-			return true
-		}
-	}
-	return false
 }
 
 var (
