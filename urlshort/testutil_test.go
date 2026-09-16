@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -102,7 +103,9 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatal(err)
 	}
 	status := NewStatusState(time.Now().UTC())
-	srv := NewServer(cfg, store, rules, auth, logs, nil, status, nil)
+	cert := makeTestCert(t, "example.com")
+	certs := &recordingCertManager{inner: &manualCertManager{cert: &cert}, status: status, logger: slog.Default()}
+	srv := NewServer(cfg, store, rules, auth, logs, certs, status, nil)
 	srv.SetMaintenance(NewMaintenance(cfg, store, nil))
 
 	env := &testEnv{t: t, cfg: cfg, store: store, logs: logs, srv: srv}

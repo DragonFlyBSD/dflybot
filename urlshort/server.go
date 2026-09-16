@@ -28,6 +28,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"golang.org/x/sys/unix"
 	"golang.org/x/time/rate"
 )
@@ -261,6 +263,66 @@ func (s *Server) Status() *StatusState { return s.status }
 
 // SetMaintenance attaches the backup maintenance state for the status endpoint.
 func (s *Server) SetMaintenance(m *Maintenance) { s.maintenance = m }
+
+// newServer builds an http.Server with the configured timeouts. HTTP/2 is
+// configured by the caller.
+func (s *Server) newServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:        h,
+		ReadTimeout:    s.readTimeout,
+		WriteTimeout:   s.writeTimeout,
+		IdleTimeout:    s.idleTimeout,
+		MaxHeaderBytes: s.cfg.Server.MaxHeaderBytes,
+		ErrorLog:       slog.NewLogLogger(s.logger.Handler(), slog.LevelWarn),
+	}
+}
+
+// tlsConfig returns the TLS config for HTTPS listeners. It applies
+// server.http2_enabled to the ALPN list; the TLS config returned by the
+// certificate manager is freshly built/cloned per call, so mutating NextProtos
+// is safe.
+func (s *Server) tlsConfig() *tls.Config {
+	cfg := s.certs.TLSConfig()
+	if s.cfg.Server.HTTP2Enabled {
+		if !containsString(cfg.NextProtos, "h2") {
+			cfg.NextProtos = append([]string{"h2"}, cfg.NextProtos...)
+		}
+		return cfg
+	}
+	kept := cfg.NextProtos[:0]
+	for _, p := range cfg.NextProtos {
+		if p != "h2" {
+			kept = append(kept, p)
+		}
+	}
+	cfg.NextProtos = kept
+	return cfg
+}
+
+// httpsServer builds the http.Server and *tls.Config for an HTTPS listener. When
+// http2_enabled is false, a non-nil TLSNextProto without an "h2" entry disables
+// the automatic HTTP/2 configuration in net/http.
+func (s *Server) httpsServer() (*http.Server, *tls.Config) {
+	srv := s.newServer(s.mainHandler)
+	if !s.cfg.Server.HTTP2Enabled {
+		srv.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){}
+	}
+	return srv, s.tlsConfig()
+}
+
+// cleartextHandler returns the handler for plain-HTTP listeners. With
+// server.h2c_enabled it wraps the handler so clients may use cleartext HTTP/2
+// (h2c); otherwise only HTTP/1.1 is served.
+func (s *Server) cleartextHandler() http.Handler {
+	h := s.mainHandler
+	if s.cfg.Server.HTTPSPort > 0 {
+		h = s.httpHandler
+	}
+	if s.cfg.Server.H2CEnabled {
+		h = h2c.NewHandler(h, &http2.Server{})
+	}
+	return h
+}
 
 // buildHTTPHandler builds the port-80 handler: ACME http-01 (when enabled)
 // with a redirect-to-HTTPS fallback.
@@ -616,17 +678,6 @@ func (s *Server) Serve(ctx context.Context) error {
 	var servers []*http.Server
 	errCh := make(chan error, 16)
 
-	newServer := func(h http.Handler) *http.Server {
-		return &http.Server{
-			Handler:        h,
-			ReadTimeout:    s.readTimeout,
-			WriteTimeout:   s.writeTimeout,
-			IdleTimeout:    s.idleTimeout,
-			MaxHeaderBytes: s.cfg.Server.MaxHeaderBytes,
-			ErrorLog:       slog.NewLogLogger(s.logger.Handler(), slog.LevelWarn),
-		}
-	}
-
 	add := func(ln net.Listener, srv *http.Server, desc string) {
 		servers = append(servers, srv)
 		s.mu.Lock()
@@ -652,11 +703,8 @@ func (s *Server) Serve(ctx context.Context) error {
 				closeAll()
 				return fmt.Errorf("listen http %s:%d: %w", addr, s.cfg.Server.HTTPPort, err)
 			}
-			h := s.mainHandler
-			if s.cfg.Server.HTTPSPort > 0 {
-				h = s.httpHandler
-			}
-			add(ln, newServer(h), ln.Addr().String())
+			h := s.cleartextHandler()
+			add(ln, s.newServer(h), ln.Addr().String())
 		}
 		if s.cfg.Server.HTTPSPort > 0 {
 			if s.certs == nil {
@@ -668,7 +716,8 @@ func (s *Server) Serve(ctx context.Context) error {
 				closeAll()
 				return fmt.Errorf("listen https %s:%d: %w", addr, s.cfg.Server.HTTPSPort, err)
 			}
-			add(tls.NewListener(ln, s.certs.TLSConfig()), newServer(s.mainHandler), ln.Addr().String())
+			srv, tlsCfg := s.httpsServer()
+			add(tls.NewListener(ln, tlsCfg), srv, ln.Addr().String())
 		}
 	}
 	if len(servers) == 0 {

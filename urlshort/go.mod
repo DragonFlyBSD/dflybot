@@ -10,7 +10,7 @@ require (
 )
 
 require (
-	golang.org/x/net v0.34.0 // indirect
+	golang.org/x/net v0.34.0
 	golang.org/x/sys v0.30.0
 	golang.org/x/text v0.22.0 // indirect
 )

@@ -146,6 +146,14 @@ production incidents. Implement and test each one explicitly.
   backups are second-granular (`links-YYYY-MM-DDTHHMMSS.db`) so repeated
   restarts to test config do not overwrite each other. Both carry the same
   `YYYY-MM-DD` prefix used by retention.
+- **C24. HTTP/2 is explicit and controlled.** HTTP/2 over TLS is enabled by
+  default via `server.http2_enabled`. The TLS config passed to
+  `tls.NewListener` must list `h2` in `NextProtos`; with `http.Server.TLSConfig`
+  left nil, `net/http` installs the h2 handler automatically. Disabling
+  requires removing `h2` from ALPN and setting a non-nil `TLSNextProto` without
+  an `h2` entry. h2c (`server.h2c_enabled`, default off) uses
+  `golang.org/x/net/http2/h2c` on the cleartext listener only; it is not a
+  substitute for TLS.
 
 ---
 
@@ -235,6 +243,13 @@ write_timeout    = 30
 idle_timeout     = 60
 # Soft request-header limit. Go adds 4096 bytes of bufio slop.
 max_header_bytes = 8192
+
+# HTTP/2 over TLS via ALPN. Enabled by default.
+http2_enabled = true
+# Cleartext HTTP/2 (h2c) on the plain HTTP listener. Off by default: browsers
+# do not use h2c and it bypasses TLS. Useful only in http-only mode or behind
+# a trusted TLS-terminating proxy.
+h2c_enabled = false
 
 [acme]
 enabled = true
@@ -360,6 +375,7 @@ Startup must fail (exit non-zero, clear message) if any of these fail.
 | `renew_before_days` | `> 0` and `< 90` |
 | `server.*_timeout` | non-negative; `read_timeout`, `write_timeout` > 0 when `https_port > 0` (C2) |
 | `max_header_bytes` | `>= 4096` (default 8192) |
+| `http2_enabled` / `h2c_enabled` | booleans; `h2c_enabled` with `https_port > 0` is accepted with a warning (it only affects the port-80 redirector) |
 | `data_dir` | present, ends with `/`, creatable, writable |
 | `backup` | `dir` (default `<data_dir>backup/`) ends with `/`, creatable and writable; `hour_utc` in [0,23]; `retention_days >= 0`; `retention_count >= 0`; `compact_tx_max_bytes > 0` |
 | rules | unique `name`; regexp compiles and cannot match the empty string; template parses; `key` starts with `/`; `hash` names an existing capture group; `hash_minlen >= 4` when `hash` set and not set otherwise |
@@ -624,6 +640,13 @@ When no rule matches:
   configured (C6). Never swallow bind errors.
 - HTTPS: create a `tls.Config` from the autocert manager (or the manual cert),
   wrap the listener with `tls.NewListener`, and serve.
+- HTTP/2 over TLS is negotiated via ALPN when `server.http2_enabled` (default
+  true). List `h2` in the TLS `NextProtos`; `http.Server.TLSConfig` stays nil so
+  `net/http` installs the h2 handler. When disabled, remove `h2` from ALPN and
+  set a non-nil `TLSNextProto` without an `h2` entry.
+- Cleartext HTTP/2 (h2c) is opt-in via `server.h2c_enabled` (default false) and
+  wraps the plain-HTTP handler with `golang.org/x/net/http2/h2c`. It is never
+  applied to the TLS listener.
 - Run each server in its own goroutine and report fatal serve errors to a
   channel that triggers shutdown.
 
@@ -1004,6 +1027,9 @@ that the operator owns renewal.
   no-referrer`, `Cache-Control: no-store` on redirects and errors. HSTS can be
   enabled manually after issuance is stable.
 - Do not set a `Server` header.
+- `h2c_enabled` is off by default. h2c is cleartext, so tokens and links travel
+  unencrypted; enable it only in http-only mode or behind a trusted
+  TLS-terminating proxy, never on a directly exposed public port 80.
 - Graceful shutdown on SIGINT/SIGTERM in the order of C16.
 - File modes: `data_dir` 0700, `links.db` 0600, `acme/` 0700, log files 0644.
 - Ports < 1024 need root or `CAP_NET_BIND_SERVICE`; see §16.

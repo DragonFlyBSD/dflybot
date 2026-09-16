@@ -41,6 +41,13 @@ idle_timeout     = 60
 # Soft request-header limit. Go adds 4096 bytes of bufio slop.
 max_header_bytes = 8192
 
+# HTTP/2 over TLS via ALPN. Enabled by default.
+http2_enabled = true
+# Cleartext HTTP/2 (h2c) on the plain HTTP listener. Off by default: browsers
+# do not use h2c and it bypasses TLS, so API tokens would travel in the clear.
+# It is only useful in http-only mode or behind a trusted TLS-terminating proxy.
+h2c_enabled = false
+
 [acme]
 enabled = true
 # Let's Encrypt production. Staging:
