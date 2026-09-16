@@ -28,8 +28,6 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 	"golang.org/x/sys/unix"
 	"golang.org/x/time/rate"
 )
@@ -308,20 +306,6 @@ func (s *Server) httpsServer() (*http.Server, *tls.Config) {
 		srv.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){}
 	}
 	return srv, s.tlsConfig()
-}
-
-// cleartextHandler returns the handler for plain-HTTP listeners. With
-// server.h2c_enabled it wraps the handler so clients may use cleartext HTTP/2
-// (h2c); otherwise only HTTP/1.1 is served.
-func (s *Server) cleartextHandler() http.Handler {
-	h := s.mainHandler
-	if s.cfg.Server.HTTPSPort > 0 {
-		h = s.httpHandler
-	}
-	if s.cfg.Server.H2CEnabled {
-		h = h2c.NewHandler(h, &http2.Server{})
-	}
-	return h
 }
 
 // buildHTTPHandler builds the port-80 handler: ACME http-01 (when enabled)
@@ -703,7 +687,10 @@ func (s *Server) Serve(ctx context.Context) error {
 				closeAll()
 				return fmt.Errorf("listen http %s:%d: %w", addr, s.cfg.Server.HTTPPort, err)
 			}
-			h := s.cleartextHandler()
+			h := s.mainHandler
+			if s.cfg.Server.HTTPSPort > 0 {
+				h = s.httpHandler
+			}
 			add(ln, s.newServer(h), ln.Addr().String())
 		}
 		if s.cfg.Server.HTTPSPort > 0 {

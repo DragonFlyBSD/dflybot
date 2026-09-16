@@ -68,10 +68,8 @@ type ServerConfig struct {
 	IdleTimeout     int `toml:"idle_timeout"`
 	MaxHeaderBytes  int `toml:"max_header_bytes"`
 
-	// HTTP2Enabled enables HTTP/2 over TLS via ALPN. H2CEnabled enables
-	// cleartext HTTP/2 (h2c) on the plain HTTP listener.
+	// HTTP2Enabled enables HTTP/2 over TLS via ALPN.
 	HTTP2Enabled bool `toml:"http2_enabled"`
-	H2CEnabled   bool `toml:"h2c_enabled"`
 }
 
 // ACMEConfig holds the automatic certificate management configuration.
@@ -157,7 +155,6 @@ func DefaultConfig() *Config {
 			IdleTimeout:     60,
 			MaxHeaderBytes:  8192,
 			HTTP2Enabled:    true,
-			H2CEnabled:      false,
 		},
 		ACME: ACMEConfig{
 			Enabled:         true,
@@ -314,9 +311,6 @@ func (c *Config) validateServer(v *validator) {
 	}
 	if s.MaxHeaderBytes < 4096 {
 		v.addf("server.max_header_bytes %d must be >= 4096", s.MaxHeaderBytes)
-	}
-	if s.H2CEnabled && s.HTTPSPort > 0 {
-		v.warnf("server.h2c_enabled is set but https_port > 0; h2c only affects the port-%d redirector", s.HTTPPort)
 	}
 
 	u, err := url.Parse(s.PublicURL)
