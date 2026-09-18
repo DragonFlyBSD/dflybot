@@ -44,6 +44,21 @@ max_header_bytes = 8192
 # HTTP/2 over TLS via ALPN. Enabled by default.
 http2_enabled = true
 
+# IPs/CIDRs of trusted reverse proxies or CDNs. X-Forwarded-For and X-Real-IP
+# are honored only when the direct peer is in this list; X-Forwarded-For is
+# walked right-to-left, skipping trusted proxies. Defaults to localhost.
+trusted_proxies = ["127.0.0.0/8", "::1/128"]
+
+[server.hsts]
+# Strict-Transport-Security header. Only valid when https_port > 0.
+enabled = false
+# max-age in seconds; 31536000 (1 year) is the conventional value.
+max_age = 31536000
+# Add "; includeSubDomains".
+include_subdomains = false
+# Add "; preload"; requires include_subdomains = true and max_age >= 31536000.
+preload = false
+
 [acme]
 enabled = true
 # Let's Encrypt production. Staging:

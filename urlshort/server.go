@@ -206,6 +206,8 @@ type Server struct {
 	redirectLimiter *RateLimiter
 	apiLimiter      *RateLimiter
 	allowedHosts    map[string]bool
+	trustedProxies  []netip.Prefix
+	hstsValue       string
 
 	// Handler for normal (HTTPS or http-only) traffic.
 	mainHandler http.Handler
@@ -250,7 +252,14 @@ func NewServer(cfg *Config, store Store, rules *Ruleset, auth *Authenticator, lo
 	for _, h := range cfg.AllowedHosts() {
 		s.allowedHosts[h] = true
 	}
+	s.trustedProxies = cfg.TrustedProxyPrefixes()
+	if hsts := cfg.Server.HSTS; hsts.Enabled {
+		s.hstsValue = hsts.HeaderValue()
+	}
 	s.mainHandler = s.wrap(http.HandlerFunc(s.routeMain))
+	if s.hstsValue != "" {
+		s.mainHandler = s.hstsMiddleware(s.mainHandler)
+	}
 	s.httpHandler = s.buildHTTPHandler()
 	return s
 }
@@ -335,6 +344,7 @@ type contextKey int
 const (
 	requestIDKey contextKey = iota
 	accessInfoKey
+	clientIPKey
 )
 
 // accessInfo is filled in by handlers for the access log.
@@ -364,6 +374,7 @@ func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
 		ai := &accessInfo{}
 		ctx := context.WithValue(r.Context(), requestIDKey, id)
 		ctx = context.WithValue(ctx, accessInfoKey, ai)
+		ctx = context.WithValue(ctx, clientIPKey, s.clientIP(r))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -420,7 +431,11 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if !s.redirectLimiter.Allow(sourceKey(r.RemoteAddr)) {
+		key := rateKey(clientIPFrom(r))
+		if key == "" {
+			key = r.RemoteAddr
+		}
+		if !s.redirectLimiter.Allow(key) {
 			w.Header().Set("Retry-After", "1")
 			writePlainError(w, http.StatusTooManyRequests, "rate limited")
 			return
@@ -448,10 +463,14 @@ func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
 			typ = classifyAccessType(r.URL.Path)
 		}
 		id, _ := r.Context().Value(requestIDKey).(string)
+		remote := remoteHost(r.RemoteAddr)
+		if ip := clientIPFrom(r); ip.IsValid() {
+			remote = ip.String()
+		}
 		entry := AccessEntry{
 			Timestamp:  start.UTC(),
 			Type:       typ,
-			RemoteIP:   remoteIP(r.RemoteAddr),
+			RemoteIP:   remote,
 			Method:     r.Method,
 			Host:       r.Host,
 			Path:       r.URL.Path,
@@ -467,6 +486,15 @@ func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
 		}
 		entry.Key, entry.Target, entry.Rule, entry.Action = ai.Key, ai.Target, ai.Rule, ai.Action
 		s.logs.Log(entry)
+	})
+}
+
+// hstsMiddleware sets the Strict-Transport-Security header on the HTTPS
+// handler. It is only installed when server.hsts.enabled is true.
+func (s *Server) hstsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Strict-Transport-Security", s.hstsValue)
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -560,28 +588,71 @@ func (s *Server) redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 // Helpers
 
-// remoteIP extracts the client IP from RemoteAddr, ignoring any forwarding
-// headers (C13).
-func remoteIP(remoteAddr string) string {
+// remoteHost returns the host part of a RemoteAddr (without the port).
+func remoteHost(remoteAddr string) string {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
-		host = remoteAddr
-	}
-	if ip, err := netip.ParseAddr(host); err == nil {
-		return ip.Unmap().String()
+		return remoteAddr
 	}
 	return host
 }
 
-// sourceKey buckets a source for rate limiting: IPv4 /32 and IPv6 /64.
-func sourceKey(remoteAddr string) string {
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		host = remoteAddr
+// clientIPFrom returns the client IP computed by requestIDMiddleware.
+func clientIPFrom(r *http.Request) netip.Addr {
+	if ip, ok := r.Context().Value(clientIPKey).(netip.Addr); ok {
+		return ip
 	}
-	ip, err := netip.ParseAddr(host)
+	return netip.Addr{}
+}
+
+// isTrustedProxy reports whether ip is one of the configured trusted proxies.
+func (s *Server) isTrustedProxy(ip netip.Addr) bool {
+	for _, p := range s.trustedProxies {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// clientIP extracts the real client IP. Forwarding headers are only trusted
+// when the direct peer is a configured trusted proxy (C13, section 14).
+// X-Forwarded-For is walked right-to-left, skipping trusted proxies, so a
+// client-injected value cannot spoof the result; X-Real-IP is the fallback.
+func (s *Server) clientIP(r *http.Request) netip.Addr {
+	direct, err := netip.ParseAddr(remoteHost(r.RemoteAddr))
 	if err != nil {
-		return host
+		return netip.Addr{}
+	}
+	direct = direct.Unmap()
+	if !s.isTrustedProxy(direct) {
+		return direct
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		items := strings.Split(xff, ",")
+		for i := len(items) - 1; i >= 0; i-- {
+			cand, err := netip.ParseAddr(strings.TrimSpace(items[i]))
+			if err != nil {
+				break
+			}
+			cand = cand.Unmap()
+			if i == 0 || !s.isTrustedProxy(cand) {
+				return cand
+			}
+		}
+	}
+	if xri := strings.TrimSpace(r.Header.Get("X-Real-IP")); xri != "" {
+		if cand, err := netip.ParseAddr(xri); err == nil {
+			return cand.Unmap()
+		}
+	}
+	return direct
+}
+
+// rateKey buckets an address for rate limiting: IPv4 /32 and IPv6 /64.
+func rateKey(ip netip.Addr) string {
+	if !ip.IsValid() {
+		return ""
 	}
 	ip = ip.Unmap()
 	if ip.Is4() {

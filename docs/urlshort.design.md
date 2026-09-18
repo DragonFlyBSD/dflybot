@@ -106,8 +106,11 @@ production incidents. Implement and test each one explicitly.
 - **C12. Constant-time token comparison.** Hash presented and configured tokens
   with SHA-256 and compare digests with `crypto/subtle`, without early exit
   over clients.
-- **C13. Never trust `X-Forwarded-For`.** The service is directly exposed; use
-  `RemoteAddr` only.
+- **C13. Trust forwarding headers only from trusted proxies.** The direct peer
+  (`RemoteAddr`) must be in `server.trusted_proxies` (default localhost). When
+  it is, use `X-Forwarded-For` (walked right-to-left, skipping trusted proxies)
+  and then `X-Real-IP`; otherwise use `RemoteAddr`. Never trust these headers
+  from an untrusted peer.
 - **C14. Access logging cannot stall requests.** Use a bounded channel and a
   single writer goroutine; drop and count on overflow.
 - **C15. Pre-warm uses a regular SNI and normal ALPN, not `acme-tls/1`.**
@@ -152,6 +155,15 @@ production incidents. Implement and test each one explicitly.
   left nil, `net/http` installs the h2 handler automatically. Disabling
   requires removing `h2` from ALPN and setting a non-nil `TLSNextProto` without
   an `h2` entry.
+- **C25. Trusted proxies gate forwarding headers.** `server.trusted_proxies`
+  (default `127.0.0.0/8` and `::1/128`) lists the peers whose
+  `X-Forwarded-For`/`X-Real-IP` headers are trusted. `X-Forwarded-For` is
+  walked right-to-left, skipping trusted proxies, so a client-injected value
+  cannot spoof the result; otherwise `RemoteAddr` is used. The extracted IP
+  drives the access log and rate limiting.
+- **C26. HSTS is opt-in and HTTPS-only.** `server.hsts.enabled` (default false)
+  requires `https_port > 0`; the header is only set on HTTPS responses.
+  `preload` requires `include_subdomains = true` and `max_age >= 31536000`.
 
 ---
 
@@ -244,6 +256,21 @@ max_header_bytes = 8192
 
 # HTTP/2 over TLS via ALPN. Enabled by default.
 http2_enabled = true
+
+# IPs/CIDRs of trusted reverse proxies or CDNs. X-Forwarded-For and X-Real-IP
+# are honored only when the direct peer is in this list; X-Forwarded-For is
+# walked right-to-left, skipping trusted proxies. Defaults to localhost.
+trusted_proxies = ["127.0.0.0/8", "::1/128"]
+
+[server.hsts]
+# Strict-Transport-Security header. Only valid when https_port > 0.
+enabled = false
+# max-age in seconds; 31536000 (1 year) is the conventional value.
+max_age = 31536000
+# Add "; includeSubDomains".
+include_subdomains = false
+# Add "; preload"; requires include_subdomains = true and max_age >= 31536000.
+preload = false
 
 [acme]
 enabled = true
@@ -370,6 +397,8 @@ Startup must fail (exit non-zero, clear message) if any of these fail.
 | `server.*_timeout` | non-negative; `read_timeout`, `write_timeout` > 0 when `https_port > 0` (C2) |
 | `max_header_bytes` | `>= 4096` (default 8192) |
 | `http2_enabled` | boolean (default true) |
+| `trusted_proxies` | each entry is an IP or CIDR; a prefix length of 0 warns (trusts every peer) |
+| `hsts` | `enabled` requires `https_port > 0` and `max_age > 0`; `preload` requires `include_subdomains` and `max_age >= 31536000` |
 | `data_dir` | present, ends with `/`, creatable, writable |
 | `backup` | `dir` (default `<data_dir>backup/`) ends with `/`, creatable and writable; `hour_utc` in [0,23]; `retention_days >= 0`; `retention_count >= 0`; `compact_tx_max_bytes > 0` |
 | rules | unique `name`; regexp compiles and cannot match the empty string; template parses; `key` starts with `/`; `hash` names an existing capture group; `hash_minlen >= 4` when `hash` set and not set otherwise |
@@ -976,7 +1005,7 @@ that the operator owns renewal.
 - `type` is `redirect`, `api`, or `acme`.
 - API records include `client` and `action` (`create`, `update`, `delete`,
   `resolve`, `status`); request bodies are never logged.
-- `remote_ip` comes from `RemoteAddr` only (C13).
+- `remote_ip` is the trusted-proxy-aware client IP (C13, C25).
 - `type=acme` covers port-80 http-01 requests when fallback is enabled;
   tls-alpn-01 handshakes are not visible to HTTP handlers and are logged by the
   TLS wrapper if desired.
@@ -1018,6 +1047,10 @@ that the operator owns renewal.
   no-referrer`, `Cache-Control: no-store` on redirects and errors. HSTS can be
   enabled manually after issuance is stable.
 - Do not set a `Server` header.
+- Forwarding headers are honored only from `server.trusted_proxies` (default
+  localhost); never trust `X-Forwarded-For`/`X-Real-IP` from other peers (C13,
+  C25).
+- HSTS is opt-in (`server.hsts`, default off) and HTTPS-only (C26).
 - Graceful shutdown on SIGINT/SIGTERM in the order of C16.
 - File modes: `data_dir` 0700, `links.db` 0600, `acme/` 0700, log files 0644.
 - Ports < 1024 need root or `CAP_NET_BIND_SERVICE`; see §16.

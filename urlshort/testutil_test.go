@@ -34,6 +34,12 @@ type testEnv struct {
 }
 
 func newTestEnv(t *testing.T) *testEnv {
+	return newTestEnvWith(t, nil)
+}
+
+// newTestEnvWith builds a test environment, applying mutate to the config
+// before validation.
+func newTestEnvWith(t *testing.T, mutate func(*Config)) *testEnv {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -78,6 +84,9 @@ func newTestEnv(t *testing.T) *testEnv {
 	cfg.Clients = []ClientConfig{
 		{Enabled: true, Name: "admin", Admin: true, Tokens: []string{testAdminToken}},
 		{Enabled: true, Name: "git", Namespaces: []string{"/g/"}, Tokens: []string{testGitToken}},
+	}
+	if mutate != nil {
+		mutate(cfg)
 	}
 	if err := cfg.applyDerivedDefaults(); err != nil {
 		t.Fatal(err)

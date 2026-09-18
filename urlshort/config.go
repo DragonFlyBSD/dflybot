@@ -20,6 +20,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -49,8 +50,9 @@ type Config struct {
 	Clients       []ClientConfig    `toml:"clients"`
 
 	// Derived values (not decoded from TOML).
-	publicURL *url.URL `toml:"-"`
-	Warnings  []string `toml:"-"`
+	publicURL       *url.URL       `toml:"-"`
+	trustedPrefixes []netip.Prefix `toml:"-"`
+	Warnings        []string       `toml:"-"`
 }
 
 // ServerConfig holds the HTTP/TLS listener configuration.
@@ -71,6 +73,34 @@ type ServerConfig struct {
 
 	// HTTP2Enabled enables HTTP/2 over TLS via ALPN.
 	HTTP2Enabled bool `toml:"http2_enabled"`
+
+	// TrustedProxies lists the IPs/CIDRs whose X-Forwarded-For and X-Real-IP
+	// headers are trusted for client IP extraction. Defaults to localhost.
+	TrustedProxies []string `toml:"trusted_proxies"`
+
+	// HSTS configures the Strict-Transport-Security response header. It can
+	// only be enabled when https_port > 0.
+	HSTS HSTSConfig `toml:"hsts"`
+}
+
+// HSTSConfig configures the Strict-Transport-Security header.
+type HSTSConfig struct {
+	Enabled           bool `toml:"enabled"`
+	MaxAge            int  `toml:"max_age"`
+	IncludeSubDomains bool `toml:"include_subdomains"`
+	Preload           bool `toml:"preload"`
+}
+
+// HeaderValue renders the Strict-Transport-Security header value.
+func (h HSTSConfig) HeaderValue() string {
+	v := fmt.Sprintf("max-age=%d", h.MaxAge)
+	if h.IncludeSubDomains {
+		v += "; includeSubDomains"
+	}
+	if h.Preload {
+		v += "; preload"
+	}
+	return v
 }
 
 // ACMEConfig holds the automatic certificate management configuration.
@@ -156,6 +186,11 @@ func DefaultConfig() *Config {
 			IdleTimeout:     60,
 			MaxHeaderBytes:  8192,
 			HTTP2Enabled:    true,
+			TrustedProxies:  []string{"127.0.0.0/8", "::1/128"},
+			HSTS: HSTSConfig{
+				Enabled: false,
+				MaxAge:  31536000,
+			},
 		},
 		ACME: ACMEConfig{
 			Enabled:         true,
@@ -313,6 +348,8 @@ func (c *Config) validateServer(v *validator) {
 	if s.MaxHeaderBytes < 4096 {
 		v.addf("server.max_header_bytes %d must be >= 4096", s.MaxHeaderBytes)
 	}
+	c.validateTrustedProxies(v)
+	c.validateHSTS(v)
 
 	u, err := url.Parse(s.PublicURL)
 	if err != nil {
@@ -368,6 +405,39 @@ func (c *Config) validateServer(v *validator) {
 		if !isASCII(h) {
 			v.addf("server.extra_hosts entry %q must be ASCII/punycode", h)
 		}
+	}
+}
+
+func (c *Config) validateTrustedProxies(v *validator) {
+	prefixes, err := parseTrustedProxies(c.Server.TrustedProxies)
+	if err != nil {
+		v.addf("server.trusted_proxies: %v", err)
+		return
+	}
+	c.trustedPrefixes = prefixes
+	for _, p := range prefixes {
+		if p.Bits() == 0 {
+			v.warnf("server.trusted_proxies includes %s, which trusts every peer", p)
+		}
+	}
+}
+
+func (c *Config) validateHSTS(v *validator) {
+	h := c.Server.HSTS
+	if !h.Enabled {
+		return
+	}
+	if c.Server.HTTPSPort == 0 {
+		v.addf("server.hsts.enabled requires server.https_port > 0")
+	}
+	if h.MaxAge <= 0 {
+		v.addf("server.hsts.max_age must be > 0 when enabled")
+	}
+	if h.Preload && !h.IncludeSubDomains {
+		v.addf("server.hsts.preload requires include_subdomains = true")
+	}
+	if h.Preload && h.MaxAge < 31536000 {
+		v.addf("server.hsts.preload requires max_age >= 31536000")
 	}
 }
 
@@ -590,6 +660,37 @@ func (c *Config) warnNamespaceOverlap(v *validator) {
 
 // ---------------------------------------------------------------------------
 // Helpers
+
+// parseTrustedProxies parses a list of IPs and CIDRs into prefixes. A bare
+// IP becomes a /32 (IPv4) or /128 (IPv6) prefix.
+func parseTrustedProxies(list []string) ([]netip.Prefix, error) {
+	out := make([]netip.Prefix, 0, len(list))
+	for _, item := range list {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if p, err := netip.ParsePrefix(item); err == nil {
+			out = append(out, p.Masked())
+			continue
+		}
+		a, err := netip.ParseAddr(item)
+		if err != nil {
+			return nil, fmt.Errorf("invalid entry %q: not an IP or CIDR", item)
+		}
+		a = a.Unmap()
+		bits := 128
+		if a.Is4() {
+			bits = 32
+		}
+		out = append(out, netip.PrefixFrom(a, bits).Masked())
+	}
+	return out, nil
+}
+
+// TrustedProxyPrefixes returns the trusted proxy prefixes parsed during
+// validation.
+func (c *Config) TrustedProxyPrefixes() []netip.Prefix { return c.trustedPrefixes }
 
 func isASCII(s string) bool {
 	for i := 0; i < len(s); i++ {
