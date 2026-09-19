@@ -341,13 +341,13 @@ func (s *BoltStore) CompactTo(path string) error {
 	return closeErr
 }
 
-func (s *BoltStore) Stats() (DBStats, error) {
+func (s *BoltStore) Stats() (StoreStats, error) {
 	fi, err := os.Stat(s.path)
 	if err != nil {
-		return DBStats{}, err
+		return StoreStats{}, err
 	}
 	st := s.db.Stats()
-	return DBStats{
+	return StoreStats{
 		FileSizeBytes: fi.Size(),
 		TxN:           st.TxN,
 		OpenTxN:       st.OpenTxN,

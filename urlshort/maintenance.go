@@ -167,7 +167,7 @@ func (m *Maintenance) backup(trigger string) error {
 	}
 
 	part := final + ".part"
-	_ = os.Remove(part)
+	os.Remove(part)
 
 	var liveSize int64
 	if st, err := m.store.Stats(); err == nil {
@@ -176,16 +176,16 @@ func (m *Maintenance) backup(trigger string) error {
 
 	start := time.Now()
 	if err := m.store.CompactTo(part); err != nil {
-		_ = os.Remove(part)
+		os.Remove(part)
 		return fmt.Errorf("compact: %w", err)
 	}
 	linksN, targetsN, err := verifyBoltFile(part)
 	if err != nil {
-		_ = os.Remove(part)
+		os.Remove(part)
 		return fmt.Errorf("verify compacted backup: %w", err)
 	}
 	if err := os.Rename(part, final); err != nil {
-		_ = os.Remove(part)
+		os.Remove(part)
 		return fmt.Errorf("publish backup: %w", err)
 	}
 	fsyncDir(dir)
@@ -278,7 +278,7 @@ func (m *Maintenance) cleanup(now time.Time) {
 			continue
 		}
 		if now.UTC().Sub(info.ModTime()) > 24*time.Hour {
-			_ = os.Remove(filepath.Join(dir, e.Name()))
+			os.Remove(filepath.Join(dir, e.Name()))
 		}
 	}
 }
@@ -335,6 +335,6 @@ func fsyncDir(dir string) {
 	if err != nil {
 		return
 	}
-	defer d.Close()
-	_ = d.Sync()
+	d.Sync()
+	d.Close()
 }

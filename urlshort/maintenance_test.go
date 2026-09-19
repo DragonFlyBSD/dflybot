@@ -56,7 +56,7 @@ func TestMaintenanceBackup(t *testing.T) {
 	}
 	for i := 0; i < 150; i++ {
 		// Delete a subset to create free pages; ignore not-found.
-		_ = store.Delete("/g/" + string(rune('a'+i%26)) + string(rune('0'+i/26)))
+		store.Delete("/g/" + string(rune('a'+i%26)) + string(rune('0'+i/26)))
 	}
 
 	clock := newMaintClock(time.Date(2026, 9, 11, 3, 0, 0, 0, time.UTC))

@@ -20,8 +20,8 @@ import (
 // Client is one authenticated API caller.
 type Client struct {
 	Name       string
-	Admin      bool
-	Namespaces []string
+	IsAdmin    bool
+	Namespaces []string // Every namespace ends with a slash '/'.
 
 	// Hash tokens to achieve constant-time comparison for security.
 	digests [][sha256.Size]byte
@@ -41,14 +41,15 @@ func NewAuthenticator(cfgs []ClientConfig) (*Authenticator, error) {
 		if !cfg.Enabled {
 			continue
 		}
-		c := &Client{Name: cfg.Name, Admin: cfg.Admin, Namespaces: cfg.Namespaces}
+		c := &Client{Name: cfg.Name, IsAdmin: cfg.Admin, Namespaces: cfg.Namespaces}
 		for _, tok := range cfg.Tokens {
 			d := sha256.Sum256([]byte(tok))
 			c.digests = append(c.digests, d)
 		}
 		for _, d := range c.digests {
 			if other, ok := seen[d]; ok {
-				return nil, fmt.Errorf("client %q shares a token with client %q", cfg.Name, other)
+				return nil, fmt.Errorf("client %q shares a token with client %q",
+					cfg.Name, other)
 			}
 			seen[d] = cfg.Name
 		}
@@ -77,7 +78,7 @@ func (a *Authenticator) Authenticate(token string) (*Client, bool) {
 
 // CanAccess reports whether the client may read or write key.
 func (c *Client) CanAccess(key string) bool {
-	if c.Admin {
+	if c.IsAdmin {
 		return true
 	}
 	for _, ns := range c.Namespaces {

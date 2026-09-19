@@ -257,10 +257,7 @@ func NewServer(cfg *Config, store Store, rules *Ruleset, auth *Authenticator, lo
 	if hsts := cfg.Server.HSTS; hsts.Enabled {
 		s.hstsValue = hsts.HeaderValue()
 	}
-	s.mainHandler = s.wrap(http.HandlerFunc(s.routeMain))
-	if s.hstsValue != "" {
-		s.mainHandler = s.hstsMiddleware(s.mainHandler)
-	}
+	s.mainHandler = s.buildMainHandler()
 	s.httpHandler = s.buildHTTPHandler()
 	return s
 }
@@ -300,6 +297,18 @@ func (s *Server) httpsServer() (*http.Server, *tls.Config) {
 		}
 	}
 	return srv, cfg
+}
+
+func (s *Server) buildMainHandler() http.Handler {
+	var route http.Handler = http.HandlerFunc(s.routeMain)
+	if s.hstsValue != "" {
+		next := route
+		route = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Strict-Transport-Security", s.hstsValue)
+			next.ServeHTTP(w, r)
+		})
+	}
+	return s.wrap(route)
 }
 
 // buildHTTPHandler builds the port-80 handler: ACME http-01 (when enabled)
@@ -490,15 +499,6 @@ func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// hstsMiddleware sets the Strict-Transport-Security header on the HTTPS
-// handler. It is only installed when server.hsts.enabled is true.
-func (s *Server) hstsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Strict-Transport-Security", s.hstsValue)
-		next.ServeHTTP(w, r)
-	})
-}
-
 func classifyAccessType(path string) string {
 	switch {
 	case strings.HasPrefix(path, "/.well-known/acme-challenge/"):
@@ -538,8 +538,6 @@ func (r *statusRecorder) Flush() {
 	}
 }
 
-func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
-
 // ---------------------------------------------------------------------------
 // Routing
 
@@ -556,7 +554,7 @@ func (s *Server) routeMain(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		_, _ = w.Write([]byte("User-agent: *\nDisallow: /\n"))
+		w.Write([]byte("User-agent: *\nDisallow: /\n"))
 	case p == "/favicon.ico":
 		if !requireGetHead(w, r) {
 			return
@@ -701,7 +699,8 @@ func listenTCP(ctx context.Context, addr string, port int) (net.Listener, error)
 			var setErr error
 			if err := c.Control(func(fd uintptr) {
 				if strings.Contains(addr, ":") {
-					setErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 1)
+					setErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6,
+						unix.IPV6_V6ONLY, 1)
 				}
 			}); err != nil {
 				return err
@@ -732,7 +731,7 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	closeAll := func() {
 		for _, srv := range servers {
-			_ = srv.Close()
+			srv.Close()
 		}
 	}
 
@@ -771,7 +770,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	case <-ctx.Done():
 		return s.shutdown(servers)
 	case err := <-errCh:
-		_ = s.shutdown(servers)
+		s.shutdown(servers)
 		return err
 	}
 }

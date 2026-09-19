@@ -44,6 +44,6 @@ func (s *Server) handleRedirect(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Location", link.Target)
 	w.WriteHeader(http.StatusFound)
 	if r.Method == http.MethodGet {
-		_, _ = w.Write([]byte("Redirecting to " + link.Target + "\n"))
+		w.Write([]byte("Redirecting to " + link.Target + "\n"))
 	}
 }

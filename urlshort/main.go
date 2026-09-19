@@ -80,12 +80,13 @@ func run(configPath string) error {
 	srv := NewServer(cfg, store, rules, auth, logs, certs, status, logger)
 	maint := NewMaintenance(cfg, store, logger)
 	srv.SetMaintenance(maint)
-	defer maint.Stop()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	maint.Start(ctx)
+	defer maint.Stop()
+
 	if cfg.ACME.Enabled {
 		prewarm(certs, cfg.PublicHost(), status, logger)
 	}

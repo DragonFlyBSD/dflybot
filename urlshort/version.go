@@ -10,7 +10,7 @@ package main
 const programName = "urlshort"
 
 // version is the program version reported by the status endpoint and logs.
-// It can be overridden at build time with
+// It can be overridden at build time with:
 //
 //	-ldflags "-X main.version=<version>"
 var version = "0.1.0"

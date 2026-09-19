@@ -51,7 +51,7 @@ func TestAuthenticate(t *testing.T) {
 		t.Fatalf("rotated token auth: %v %v", c2, ok)
 	}
 	c, ok = a.Authenticate("admin-token-value-1234567890abc")
-	if !ok || !c.Admin {
+	if !ok || !c.IsAdmin {
 		t.Fatalf("admin auth: %v %v", c, ok)
 	}
 	if _, ok := a.Authenticate("wrong-token"); ok {

@@ -37,8 +37,8 @@ type Link struct {
 // key for which isFree returned false.
 type KeyFunc func(isFree func(key string) (bool, error)) (string, error)
 
-// DBStats is a snapshot of storage statistics for the status endpoint.
-type DBStats struct {
+// StoreStats is a snapshot of storage statistics for the status endpoint.
+type StoreStats struct {
 	FileSizeBytes int64 `json:"file_size_bytes"`
 	TxN           int   `json:"tx_n"`
 	OpenTxN       int   `json:"open_tx_n"`
@@ -71,7 +71,7 @@ type Store interface {
 	// CompactTo writes a compacted copy of the database to path.
 	CompactTo(path string) error
 	// Stats returns storage statistics.
-	Stats() (DBStats, error)
+	Stats() (StoreStats, error)
 	// Close closes the database.
 	Close() error
 }

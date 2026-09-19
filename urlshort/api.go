@@ -39,7 +39,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	json.NewEncoder(w).Encode(v)
 }
 
 type apiErrorBody struct {
@@ -67,18 +67,22 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	if err := dec.Decode(v); err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
-			writeAPIError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "request body too large")
+			writeAPIError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+				"request body too large")
 			return false
 		}
 		if errors.Is(err, io.EOF) {
-			writeAPIError(w, http.StatusBadRequest, "bad_request", "request body is required")
+			writeAPIError(w, http.StatusBadRequest, "bad_request",
+				"request body is required")
 			return false
 		}
-		writeAPIError(w, http.StatusBadRequest, "bad_request", "invalid JSON: "+err.Error())
+		writeAPIError(w, http.StatusBadRequest, "bad_request",
+			"invalid JSON: "+err.Error())
 		return false
 	}
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeAPIError(w, http.StatusBadRequest, "bad_request", "request body must contain a single JSON object")
+		writeAPIError(w, http.StatusBadRequest, "bad_request",
+			"request body must contain a single JSON object")
 		return false
 	}
 	return true
@@ -113,8 +117,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		if !s.allowAPI(w, c) {
 			return
 		}
-		if !c.Admin {
-			writeAPIError(w, http.StatusForbidden, "forbidden", "admin token required")
+		if !c.IsAdmin {
+			writeAPIError(w, http.StatusForbidden, "forbidden", "admin required")
 			return
 		}
 		if !requireMethod(w, r, http.MethodGet) {
@@ -183,7 +187,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request, c *Client) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":       c.Name,
-		"admin":      c.Admin,
+		"admin":      c.IsAdmin,
 		"namespaces": c.Namespaces,
 	})
 }
@@ -242,7 +246,8 @@ func (s *Server) linkView(l *Link) linkView {
 func (s *Server) storeError(w http.ResponseWriter, err error, context string) {
 	switch {
 	case errors.Is(err, ErrForbidden):
-		writeAPIError(w, http.StatusForbidden, "forbidden", "key is outside the caller's namespaces")
+		writeAPIError(w, http.StatusForbidden, "forbidden",
+			"key is outside the caller's namespaces")
 	case errors.Is(err, ErrConflict):
 		// Operator-actionable: hash exhaustion or a cross-rule collision (7.4).
 		s.logger.Warn("link conflict", "error", err)
@@ -257,11 +262,13 @@ func (s *Server) storeError(w http.ResponseWriter, err error, context string) {
 func (s *Server) getLink(w http.ResponseWriter, r *http.Request, c *Client) {
 	key := r.URL.Query().Get("key")
 	if key == "" {
-		writeAPIError(w, http.StatusBadRequest, "bad_request", "key query parameter is required")
+		writeAPIError(w, http.StatusBadRequest, "bad_request",
+			"key query parameter is required")
 		return
 	}
 	if !c.CanAccess(key) {
-		writeAPIError(w, http.StatusForbidden, "forbidden", "key is outside the caller's namespaces")
+		writeAPIError(w, http.StatusForbidden, "forbidden",
+			"key is outside the caller's namespaces")
 		return
 	}
 	link, err := s.store.Get(key)
@@ -281,7 +288,8 @@ func (s *Server) listLinks(w http.ResponseWriter, r *http.Request, c *Client) {
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
-			writeAPIError(w, http.StatusBadRequest, "bad_request", "limit must be a positive integer")
+			writeAPIError(w, http.StatusBadRequest, "bad_request",
+				"limit must be a positive integer")
 			return
 		}
 		limit = n
@@ -298,12 +306,13 @@ func (s *Server) listLinks(w http.ResponseWriter, r *http.Request, c *Client) {
 	)
 	switch {
 	case nsParam != "":
-		if !c.Admin && !clientOwnsPrefix(c, nsParam) {
-			writeAPIError(w, http.StatusForbidden, "forbidden", "namespace is outside the caller's namespaces")
+		if !c.IsAdmin && !clientOwnsPrefix(c, nsParam) {
+			writeAPIError(w, http.StatusForbidden, "forbidden",
+				"namespace is outside the caller's namespaces")
 			return
 		}
 		links, next, err = s.store.List(nsParam, limit, cursor)
-	case c.Admin:
+	case c.IsAdmin:
 		links, next, err = s.store.List("", limit, cursor)
 	case len(c.Namespaces) == 1:
 		links, next, err = s.store.List(c.Namespaces[0], limit, cursor)
@@ -374,7 +383,8 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request, c *Client) {
 	}
 	target, err := CanonicalizeTarget(req.Target)
 	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "bad_request", "invalid target: "+err.Error())
+		writeAPIError(w, http.StatusBadRequest, "bad_request",
+			"invalid target: "+err.Error())
 		return
 	}
 
@@ -391,11 +401,13 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request, c *Client) {
 
 	if req.Key != "" {
 		if err := ValidateKey(req.Key); err != nil {
-			writeAPIError(w, http.StatusBadRequest, "bad_request", "invalid key: "+err.Error())
+			writeAPIError(w, http.StatusBadRequest, "bad_request",
+				"invalid key: "+err.Error())
 			return
 		}
 		if !c.CanAccess(req.Key) {
-			writeAPIError(w, http.StatusForbidden, "forbidden", "key is outside the caller's namespaces")
+			writeAPIError(w, http.StatusForbidden, "forbidden",
+				"key is outside the caller's namespaces")
 			return
 		}
 		link, created, err := s.store.Create(target, "", c.Name, req.Key, nil)
@@ -424,7 +436,8 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request, c *Client) {
 			return
 		}
 		if !c.CanAccess(full) {
-			writeAPIError(w, http.StatusForbidden, "forbidden", "rule key is outside the caller's namespaces")
+			writeAPIError(w, http.StatusForbidden, "forbidden",
+				"rule key is outside the caller's namespaces")
 			return
 		}
 		gen = func(isFree func(string) (bool, error)) (string, error) {
@@ -476,11 +489,13 @@ func (s *Server) finishCreate(w http.ResponseWriter, r *http.Request, link *Link
 func (s *Server) updateLink(w http.ResponseWriter, r *http.Request, c *Client) {
 	key := r.URL.Query().Get("key")
 	if key == "" {
-		writeAPIError(w, http.StatusBadRequest, "bad_request", "key query parameter is required")
+		writeAPIError(w, http.StatusBadRequest, "bad_request",
+			"key query parameter is required")
 		return
 	}
 	if !c.CanAccess(key) {
-		writeAPIError(w, http.StatusForbidden, "forbidden", "key is outside the caller's namespaces")
+		writeAPIError(w, http.StatusForbidden, "forbidden",
+			"key is outside the caller's namespaces")
 		return
 	}
 	var req struct {
@@ -491,7 +506,8 @@ func (s *Server) updateLink(w http.ResponseWriter, r *http.Request, c *Client) {
 	}
 	target, err := CanonicalizeTarget(req.Target)
 	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "bad_request", "invalid target: "+err.Error())
+		writeAPIError(w, http.StatusBadRequest, "bad_request",
+			"invalid target: "+err.Error())
 		return
 	}
 	link, err := s.store.Update(key, target)
@@ -509,11 +525,13 @@ func (s *Server) updateLink(w http.ResponseWriter, r *http.Request, c *Client) {
 func (s *Server) deleteLink(w http.ResponseWriter, r *http.Request, c *Client) {
 	key := r.URL.Query().Get("key")
 	if key == "" {
-		writeAPIError(w, http.StatusBadRequest, "bad_request", "key query parameter is required")
+		writeAPIError(w, http.StatusBadRequest, "bad_request",
+			"key query parameter is required")
 		return
 	}
 	if !c.CanAccess(key) {
-		writeAPIError(w, http.StatusForbidden, "forbidden", "key is outside the caller's namespaces")
+		writeAPIError(w, http.StatusForbidden, "forbidden",
+			"key is outside the caller's namespaces")
 		return
 	}
 	if err := s.store.Delete(key); err != nil {
@@ -621,7 +639,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	clients := make([]statusClient, 0, len(s.auth.Clients()))
 	for _, c := range s.auth.Clients() {
-		clients = append(clients, statusClient{Name: c.Name, Namespaces: c.Namespaces, Admin: c.Admin})
+		clients = append(clients, statusClient{
+			Name:       c.Name,
+			Namespaces: c.Namespaces,
+			Admin:      c.IsAdmin,
+		})
 	}
 
 	dbStats, err := s.store.Stats()

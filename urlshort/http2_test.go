@@ -34,7 +34,7 @@ func TestHTTP2OverTLS(t *testing.T) {
 				t.Fatal(err)
 			}
 			srv, tlsCfg := env.srv.httpsServer()
-			go func() { _ = srv.Serve(tls.NewListener(ln, tlsCfg)) }()
+			go func() { srv.Serve(tls.NewListener(ln, tlsCfg)) }()
 			defer srv.Close()
 
 			client := &http.Client{Transport: &http.Transport{
