@@ -69,12 +69,13 @@ type AccessLogger struct {
 	logger        *slog.Logger
 	now           func() time.Time
 
-	ch      chan AccessEntry
-	stop    chan struct{}
-	done    chan struct{}
-	stopped sync.Once
-	closed  atomic.Bool
-	dropped atomic.Int64
+	filePrefix string
+	ch         chan AccessEntry
+	stop       chan struct{}
+	done       chan struct{}
+	stopped    sync.Once
+	closed     atomic.Bool
+	dropped    atomic.Int64
 }
 
 // NewAccessLogger creates the log directory, prunes old files, and starts the
@@ -102,6 +103,7 @@ func NewAccessLogger(
 		flushInterval: flushInterval,
 		logger:        logger,
 		now:           now,
+		filePrefix:    "access-",
 		ch:            make(chan AccessEntry, 4096),
 		stop:          make(chan struct{}),
 		done:          make(chan struct{}),
@@ -130,7 +132,9 @@ func (l *AccessLogger) Log(e AccessEntry) {
 }
 
 // Dropped returns the number of dropped entries.
-func (l *AccessLogger) Dropped() int64 { return l.dropped.Load() }
+func (l *AccessLogger) Dropped() int64 {
+	return l.dropped.Load()
+}
 
 // Close stops accepting entries, drains the channel, flushes, and closes the
 // file. It is safe to call more than once.
@@ -143,46 +147,45 @@ func (l *AccessLogger) Close() {
 }
 
 func (l *AccessLogger) run() {
-	defer close(l.done)
-	ticker := time.NewTicker(l.flushInterval)
-	defer ticker.Stop()
-
 	var (
+		fp       string
 		fileDate string
 		file     *os.File
 		w        *bufio.Writer
 	)
-	closeFile := func() {
-		if w != nil {
-			if err := w.Flush(); err != nil {
-				l.logger.Warn("access log flush failed", "error", err)
-			}
-		}
-		if file != nil {
-			if err := file.Close(); err != nil {
-				l.logger.Warn("access log close failed", "error", err)
-			}
-		}
-		file, w = nil, nil
-		fileDate = ""
-	}
-	rotate := func(t time.Time) {
-		day := t.UTC().Format("2006-01-02")
-		if file != nil && day == fileDate {
-			return
-		}
-		closeFile()
-		fp := filepath.Join(l.dir, "access-"+day+".jsonl")
+	openFile := func(day string) {
+		fp = filepath.Join(l.dir, l.filePrefix+day+".jsonl")
 		f, err := os.OpenFile(fp, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
 			l.logger.Warn("access log open failed", "file", fp, "error", err)
 			return
 		}
-		file, w, fileDate = f, bufio.NewWriterSize(f, 16*1024), day
+		fileDate, file, w = day, f, bufio.NewWriterSize(f, 16*1024)
+		l.logger.Info("access log opened", "file", fp)
+	}
+	closeFile := func() {
+		if w != nil {
+			if err := w.Flush(); err != nil {
+				l.logger.Warn("access log flush failed", "file", fp, "error", err)
+			}
+		}
+		if file != nil {
+			if err := file.Close(); err != nil {
+				l.logger.Warn("access log close failed", "file", fp, "error", err)
+			}
+		}
+		fileDate, file, w = "", nil, nil
 	}
 	write := func(e AccessEntry) {
-		rotate(l.now())
+		day := l.now().UTC().Format("2006-01-02")
+		if file == nil {
+			openFile(day)
+		} else if day != fileDate {
+			closeFile()
+			openFile(day)
+		}
 		if w == nil {
+			l.logger.Warn("access log file not opened", "file", fp)
 			return
 		}
 		b, err := json.Marshal(e)
@@ -196,9 +199,14 @@ func (l *AccessLogger) run() {
 		}
 	}
 
+	defer close(l.done)
 	defer closeFile()
+
 	// Retention runs at startup (in NewAccessLogger) and once per UTC day.
 	lastCleanupDay := l.now().UTC().Format("2006-01-02")
+	ticker := time.NewTicker(l.flushInterval)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case e := <-l.ch:
@@ -232,7 +240,7 @@ func (l *AccessLogger) cleanup() {
 		return
 	}
 	cutoff := l.now().UTC().AddDate(0, 0, -l.retentionDays)
-	files, err := logFiles(l.dir)
+	files, err := l.logFiles()
 	if err != nil {
 		l.logger.Warn("access log retention listing failed", "error", err)
 		return
@@ -252,23 +260,27 @@ type dayFile struct {
 	date time.Time
 }
 
-func logFiles(dir string) ([]dayFile, error) {
-	entries, err := os.ReadDir(dir)
+func (l *AccessLogger) logFiles() ([]dayFile, error) {
+	entries, err := os.ReadDir(l.dir)
 	if err != nil {
 		return nil, err
 	}
 	var out []dayFile
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, "access-") || !strings.HasSuffix(name, ".jsonl") {
+		if e.IsDir() || !strings.HasPrefix(name, l.filePrefix) ||
+			!strings.HasSuffix(name, ".jsonl") {
 			continue
 		}
-		day := strings.TrimSuffix(strings.TrimPrefix(name, "access-"), ".jsonl")
+		day := strings.TrimSuffix(strings.TrimPrefix(name, l.filePrefix), ".jsonl")
 		t, err := time.ParseInLocation("2006-01-02", day, time.UTC)
 		if err != nil {
 			continue
 		}
-		out = append(out, dayFile{path: filepath.Join(dir, name), date: t})
+		out = append(out, dayFile{
+			path: filepath.Join(l.dir, name),
+			date: t,
+		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].date.Before(out[j].date) })
 	return out, nil
@@ -277,7 +289,7 @@ func logFiles(dir string) ([]dayFile, error) {
 // Stats summarises the log directory.
 func (l *AccessLogger) Stats() AccessLogStats {
 	stats := AccessLogStats{}
-	files, err := logFiles(l.dir)
+	files, err := l.logFiles()
 	if err != nil {
 		return stats
 	}
@@ -286,7 +298,7 @@ func (l *AccessLogger) Stats() AccessLogStats {
 		stats.OldestRetained = files[0].date.Format("2006-01-02")
 	}
 	day := l.now().UTC().Format("2006-01-02")
-	stats.CurrentFile = filepath.Join(l.dir, "access-"+day+".jsonl")
+	stats.CurrentFile = filepath.Join(l.dir, l.filePrefix+day+".jsonl")
 	if fi, err := os.Stat(stats.CurrentFile); err == nil {
 		stats.CurrentSizeBytes = fi.Size()
 	}
