@@ -8,6 +8,7 @@ package main
 
 import (
 	"bufio"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -43,7 +44,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 func TestAccessLogRotation(t *testing.T) {
 	dir := t.TempDir()
 	clock := newTestClock(time.Date(2026, 9, 11, 5, 0, 0, 0, time.UTC))
-	l, err := NewAccessLogger(dir, 30, time.Hour, clock.now)
+	l, err := NewAccessLogger(dir, 30, time.Hour, clock.now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +91,7 @@ func TestAccessLogRetention(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	l, err := NewAccessLogger(dir, 30, time.Hour, func() time.Time { return now })
+	l, err := NewAccessLogger(dir, 30, time.Hour, func() time.Time { return now }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +110,8 @@ func TestAccessLogRetention(t *testing.T) {
 func TestAccessLogOverflowDrops(t *testing.T) {
 	// A full channel with no reader must drop without blocking.
 	l := &AccessLogger{
-		ch: make(chan AccessEntry, 1),
+		ch:     make(chan AccessEntry, 1),
+		logger: slog.Default(),
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -134,7 +136,7 @@ func TestAccessLogDrainOnClose(t *testing.T) {
 	dir := t.TempDir()
 	l, err := NewAccessLogger(dir, 30, time.Hour, func() time.Time {
 		return time.Date(2026, 9, 11, 5, 0, 0, 0, time.UTC)
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -107,7 +107,7 @@ func newTestEnvWith(t *testing.T, mutate func(*Config)) *testEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	logs, err := NewAccessLogger(cfg.LogsDir(), cfg.AccessLog.RetentionDays, time.Hour, nil)
+	logs, err := NewAccessLogger(cfg.LogsDir(), cfg.AccessLog.RetentionDays, time.Hour, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

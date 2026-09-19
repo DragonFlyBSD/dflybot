@@ -225,13 +225,14 @@ type Server struct {
 
 // NewServer builds the server and its handlers. certs may be nil when
 // https_port is 0.
-func NewServer(cfg *Config, store Store, rules *Ruleset, auth *Authenticator, logs *AccessLogger, certs CertManager, status *StatusState, logger *slog.Logger) *Server {
-	if logger == nil {
-		logger = slog.Default()
-	}
+func NewServer(cfg *Config, store Store, rules *Ruleset, auth *Authenticator, logs *AccessLogger, certs CertManager, status *StatusState, base *slog.Logger) *Server {
 	if status == nil {
 		status = NewStatusState()
 	}
+	if base == nil {
+		base = slog.Default()
+	}
+	logger := base.With(slog.String("comp", "server"))
 	s := &Server{
 		cfg:             cfg,
 		store:           store,

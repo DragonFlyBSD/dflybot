@@ -50,10 +50,12 @@ type Maintenance struct {
 }
 
 // NewMaintenance builds the maintenance job. The clock is injectable for tests.
-func NewMaintenance(cfg *Config, store Store, logger *slog.Logger) *Maintenance {
-	if logger == nil {
-		logger = slog.Default()
+func NewMaintenance(cfg *Config, store Store, base *slog.Logger) *Maintenance {
+	if base == nil {
+		base = slog.Default()
 	}
+	logger := base.With(slog.String("comp", "maintenance"))
+
 	return &Maintenance{
 		cfg:    cfg,
 		store:  store,
@@ -245,7 +247,8 @@ func (m *Maintenance) cleanup(now time.Time) {
 	for _, f := range files {
 		if m.cfg.Backup.RetentionDays > 0 && f.date.Before(cutoff) {
 			if err := os.Remove(f.path); err != nil {
-				m.logger.Warn("backup retention delete failed", "file", f.path, "error", err)
+				m.logger.Warn("backup retention delete failed",
+					"file", f.path, "error", err)
 			}
 			continue
 		}
@@ -255,7 +258,8 @@ func (m *Maintenance) cleanup(now time.Time) {
 	if n := m.cfg.Backup.RetentionCount; n > 0 && len(kept) > n {
 		for _, f := range kept[:len(kept)-n] {
 			if err := os.Remove(f.path); err != nil {
-				m.logger.Warn("backup count retention delete failed", "file", f.path, "error", err)
+				m.logger.Warn("backup count retention delete failed",
+					"file", f.path, "error", err)
 			}
 		}
 	}

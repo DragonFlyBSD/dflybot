@@ -49,7 +49,7 @@ func run(configPath string) error {
 	}
 
 	logs, err := NewAccessLogger(cfg.LogsDir(), cfg.AccessLog.RetentionDays,
-		time.Duration(cfg.AccessLog.FlushInterval)*time.Second, nil)
+		time.Duration(cfg.AccessLog.FlushInterval)*time.Second, nil, logger)
 	if err != nil {
 		return err
 	}

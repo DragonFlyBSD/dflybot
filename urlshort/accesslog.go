@@ -66,6 +66,7 @@ type AccessLogger struct {
 	dir           string
 	retentionDays int
 	flushInterval time.Duration
+	logger        *slog.Logger
 	now           func() time.Time
 
 	ch      chan AccessEntry
@@ -78,7 +79,17 @@ type AccessLogger struct {
 
 // NewAccessLogger creates the log directory, prunes old files, and starts the
 // writer goroutine.
-func NewAccessLogger(dir string, retentionDays int, flushInterval time.Duration, now func() time.Time) (*AccessLogger, error) {
+func NewAccessLogger(
+	dir string,
+	retentionDays int,
+	flushInterval time.Duration,
+	now func() time.Time,
+	base *slog.Logger,
+) (*AccessLogger, error) {
+	if base == nil {
+		base = slog.Default()
+	}
+	logger := base.With(slog.String("comp", "access_logger"))
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
@@ -89,6 +100,7 @@ func NewAccessLogger(dir string, retentionDays int, flushInterval time.Duration,
 		dir:           dir,
 		retentionDays: retentionDays,
 		flushInterval: flushInterval,
+		logger:        logger,
 		now:           now,
 		ch:            make(chan AccessEntry, 4096),
 		stop:          make(chan struct{}),
@@ -112,7 +124,7 @@ func (l *AccessLogger) Log(e AccessEntry) {
 	default:
 		n := l.dropped.Add(1)
 		if n == 1 || n%1000 == 0 {
-			slog.Warn("access log overflow, dropping entries", "dropped", n)
+			l.logger.Warn("access log overflow, dropping entries", "dropped", n)
 		}
 	}
 }
@@ -143,12 +155,12 @@ func (l *AccessLogger) run() {
 	closeFile := func() {
 		if w != nil {
 			if err := w.Flush(); err != nil {
-				slog.Warn("access log flush failed", "error", err)
+				l.logger.Warn("access log flush failed", "error", err)
 			}
 		}
 		if file != nil {
 			if err := file.Close(); err != nil {
-				slog.Warn("access log close failed", "error", err)
+				l.logger.Warn("access log close failed", "error", err)
 			}
 		}
 		file, w = nil, nil
@@ -163,7 +175,7 @@ func (l *AccessLogger) run() {
 		fp := filepath.Join(l.dir, "access-"+day+".jsonl")
 		f, err := os.OpenFile(fp, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
-			slog.Warn("access log open failed", "file", fp, "error", err)
+			l.logger.Warn("access log open failed", "file", fp, "error", err)
 			return
 		}
 		file, w, fileDate = f, bufio.NewWriterSize(f, 16*1024), day
@@ -175,12 +187,12 @@ func (l *AccessLogger) run() {
 		}
 		b, err := json.Marshal(e)
 		if err != nil {
-			slog.Warn("access log marshal failed", "error", err)
+			l.logger.Warn("access log marshal failed", "error", err)
 			return
 		}
 		b = append(b, '\n')
 		if _, err := w.Write(b); err != nil {
-			slog.Warn("access log write failed", "error", err)
+			l.logger.Warn("access log write failed", "error", err)
 		}
 	}
 
@@ -194,7 +206,7 @@ func (l *AccessLogger) run() {
 		case <-ticker.C:
 			if w != nil {
 				if err := w.Flush(); err != nil {
-					slog.Warn("access log flush failed", "error", err)
+					l.logger.Warn("access log flush failed", "error", err)
 				}
 			}
 			if day := l.now().UTC().Format("2006-01-02"); day != lastCleanupDay {
@@ -222,13 +234,14 @@ func (l *AccessLogger) cleanup() {
 	cutoff := l.now().UTC().AddDate(0, 0, -l.retentionDays)
 	files, err := logFiles(l.dir)
 	if err != nil {
-		slog.Warn("access log retention listing failed", "error", err)
+		l.logger.Warn("access log retention listing failed", "error", err)
 		return
 	}
 	for _, f := range files {
 		if f.date.Before(cutoff) {
 			if err := os.Remove(f.path); err != nil {
-				slog.Warn("access log retention delete failed", "file", f.path, "error", err)
+				l.logger.Warn("access log retention delete failed",
+					"file", f.path, "error", err)
 			}
 		}
 	}
