@@ -93,6 +93,10 @@ func (c *Client) CanAccess(key string) bool {
 // random fallback keys. It returns "" for a client without namespaces.
 func (c *Client) FirstNamespace() string {
 	if len(c.Namespaces) == 0 {
+		if c.IsAdmin {
+			// Admin clients fall back to the root.
+			return "/"
+		}
 		return ""
 	}
 	return c.Namespaces[0]

@@ -453,8 +453,9 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request, c *Client) {
 	} else {
 		ns := c.FirstNamespace()
 		if ns == "" {
-			// Admin clients may have no namespace; fall back to the root.
-			ns = "/"
+			writeAPIError(w, http.StatusBadRequest, "bad_request",
+				"no namespace available")
+			return
 		}
 		gen = func(isFree func(string) (bool, error)) (string, error) {
 			return GenerateRandomKey(ns, isFree)
