@@ -7,15 +7,12 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"strings"
 	"testing"
 )
 
 func testAuthenticator(t *testing.T) *Authenticator {
 	t.Helper()
-	digest := sha256.Sum256([]byte("digest-token-value-1234567890"))
 	a, err := NewAuthenticator([]ClientConfig{
 		{
 			Enabled:    true,
@@ -23,12 +20,6 @@ func testAuthenticator(t *testing.T) *Authenticator {
 			Namespaces: []string{"/g/"},
 			// Rotation: two plaintext tokens for one client.
 			Tokens: []string{"plain-token-value-1234567890ab", "rotated-token-value-1234567890"},
-		},
-		{
-			Enabled:      true,
-			Name:         "git2",
-			Namespaces:   []string{"/git/"},
-			TokensSHA256: []string{hex.EncodeToString(digest[:])},
 		},
 		{
 			Enabled: true,
@@ -59,10 +50,6 @@ func TestAuthenticate(t *testing.T) {
 	if c2, ok := a.Authenticate("rotated-token-value-1234567890"); !ok || c2.Name != "git" {
 		t.Fatalf("rotated token auth: %v %v", c2, ok)
 	}
-	c, ok = a.Authenticate("digest-token-value-1234567890")
-	if !ok || c.Name != "git2" {
-		t.Fatalf("digest auth: %v %v", c, ok)
-	}
 	c, ok = a.Authenticate("admin-token-value-1234567890abc")
 	if !ok || !c.Admin {
 		t.Fatalf("admin auth: %v %v", c, ok)
@@ -76,7 +63,7 @@ func TestAuthenticate(t *testing.T) {
 	if _, ok := a.Authenticate("disabled-token-1234567890abcdef"); ok {
 		t.Fatal("disabled client accepted")
 	}
-	if len(a.Clients()) != 3 {
+	if len(a.Clients()) != 2 {
 		t.Fatalf("enabled clients = %d, want 3", len(a.Clients()))
 	}
 }

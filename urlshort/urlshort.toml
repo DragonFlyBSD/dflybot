@@ -150,17 +150,14 @@ hash_minlen = 8       # minimum prefix length (>= 4)
 enabled    = true
 name       = "git-monitor"
 namespaces = ["/g/"]
-# Plaintext tokens (min 32 chars) and/or SHA-256 hex digests (64 chars).
-# Both lists are optional, but at least one entry across both is required.
-tokens        = ["???"]
-tokens_sha256 = []
+# Tokens to authenticate the client (min 32 chars).
+tokens     = ["???"]
 
 [[clients]]
 enabled    = true
 name       = "github-monitor"
 namespaces = ["/gh/"]
-tokens        = ["???"]
-tokens_sha256 = []
+tokens     = ["???"]
 
 [[clients]]
 enabled = true

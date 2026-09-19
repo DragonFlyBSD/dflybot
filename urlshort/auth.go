@@ -13,7 +13,6 @@ package main
 import (
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/hex"
 	"fmt"
 	"strings"
 )
@@ -24,7 +23,8 @@ type Client struct {
 	Admin      bool
 	Namespaces []string
 
-	digests [][32]byte
+	// Hash tokens to achieve constant-time comparison for security.
+	digests [][sha256.Size]byte
 }
 
 // Authenticator holds all enabled clients.
@@ -35,7 +35,7 @@ type Authenticator struct {
 // NewAuthenticator builds the digest sets. Disabled clients are skipped.
 func NewAuthenticator(cfgs []ClientConfig) (*Authenticator, error) {
 	a := &Authenticator{}
-	seen := make(map[[32]byte]string)
+	seen := make(map[[sha256.Size]byte]string)
 	for i := range cfgs {
 		cfg := &cfgs[i]
 		if !cfg.Enabled {
@@ -44,15 +44,6 @@ func NewAuthenticator(cfgs []ClientConfig) (*Authenticator, error) {
 		c := &Client{Name: cfg.Name, Admin: cfg.Admin, Namespaces: cfg.Namespaces}
 		for _, tok := range cfg.Tokens {
 			d := sha256.Sum256([]byte(tok))
-			c.digests = append(c.digests, d)
-		}
-		for _, h := range cfg.TokensSHA256 {
-			b, err := hex.DecodeString(h)
-			if err != nil {
-				return nil, fmt.Errorf("client %q: invalid tokens_sha256 entry: %w", cfg.Name, err)
-			}
-			var d [32]byte
-			copy(d[:], b)
 			c.digests = append(c.digests, d)
 		}
 		for _, d := range c.digests {

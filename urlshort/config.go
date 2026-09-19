@@ -14,9 +14,7 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/rsa"
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -155,12 +153,11 @@ type RuleConfig struct {
 
 // ClientConfig is one API client.
 type ClientConfig struct {
-	Enabled      bool     `toml:"enabled"`
-	Name         string   `toml:"name"`
-	Admin        bool     `toml:"admin"`
-	Namespaces   []string `toml:"namespaces"`
-	Tokens       []string `toml:"tokens"`
-	TokensSHA256 []string `toml:"tokens_sha256"`
+	Enabled    bool     `toml:"enabled"`
+	Name       string   `toml:"name"`
+	Admin      bool     `toml:"admin"`
+	Namespaces []string `toml:"namespaces"`
+	Tokens     []string `toml:"tokens"`
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +165,7 @@ type ClientConfig struct {
 
 const (
 	defaultDirectoryURL = "https://acme-v02.api.letsencrypt.org/directory"
+	tokenMinLen         = 32
 )
 
 // DefaultConfig returns a configuration with the documented defaults. Decoding
@@ -575,11 +573,11 @@ func (c *Config) validateRules(v *validator) {
 }
 
 func (c *Config) validateClients(v *validator) {
-	type clientDigests struct {
-		name    string
-		digests map[[32]byte]bool
+	type clientTokens struct {
+		name   string
+		tokens map[string]bool
 	}
-	var all []clientDigests
+	var all []clientTokens
 	seenNames := make(map[string]bool)
 
 	for i := range c.Clients {
@@ -595,28 +593,14 @@ func (c *Config) validateClients(v *validator) {
 		}
 		seenNames[cl.Name] = true
 
-		digests := make(map[[32]byte]bool)
+		tokens := make(map[string]bool)
 		for _, tok := range cl.Tokens {
-			if len(tok) < 32 {
-				v.addf("%s: plaintext token shorter than 32 characters", ctx)
+			if len(tok) < tokenMinLen {
+				v.addf("%s: plaintext token shorter than %d characters", ctx, tokenMinLen)
 			}
-			digests[sha256.Sum256([]byte(tok))] = true
+			tokens[tok] = true
 		}
-		for _, h := range cl.TokensSHA256 {
-			if len(h) != 64 || h != strings.ToLower(h) {
-				v.addf("%s: tokens_sha256 entry %q must be 64 lowercase hex characters", ctx, h)
-				continue
-			}
-			b, err := hex.DecodeString(h)
-			if err != nil {
-				v.addf("%s: tokens_sha256 entry %q is not valid hex", ctx, h)
-				continue
-			}
-			var d [32]byte
-			copy(d[:], b)
-			digests[d] = true
-		}
-		if cl.Enabled && len(digests) == 0 {
+		if cl.Enabled && len(tokens) == 0 {
 			v.addf("%s: enabled client must have at least one token", ctx)
 		}
 		if cl.Enabled && !cl.Admin && len(cl.Namespaces) == 0 {
@@ -627,14 +611,15 @@ func (c *Config) validateClients(v *validator) {
 				v.addf("%s: invalid namespace %q", ctx, ns)
 			}
 		}
-		all = append(all, clientDigests{name: cl.Name, digests: digests})
+		all = append(all, clientTokens{name: cl.Name, tokens: tokens})
 	}
 
 	for i := 0; i < len(all); i++ {
 		for j := i + 1; j < len(all); j++ {
-			for d := range all[i].digests {
-				if all[j].digests[d] {
-					v.addf("token digest shared by clients %q and %q", all[i].name, all[j].name)
+			for d := range all[i].tokens {
+				if all[j].tokens[d] {
+					v.addf("token shared by clients %q and %q",
+						all[i].name, all[j].name)
 				}
 			}
 		}

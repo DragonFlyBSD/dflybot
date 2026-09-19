@@ -127,9 +127,6 @@ func TestValidationFailures(t *testing.T) {
 		{"client short token", func(c *Config) {
 			c.Clients = []ClientConfig{{Enabled: true, Name: "c", Admin: true, Tokens: []string{"short"}}}
 		}, "shorter than 32"},
-		{"client bad sha", func(c *Config) {
-			c.Clients = []ClientConfig{{Enabled: true, Name: "c", Admin: true, TokensSHA256: []string{"zz"}}}
-		}, "64 lowercase hex"},
 		{"client no namespace", func(c *Config) {
 			c.Clients = []ClientConfig{{Enabled: true, Name: "c", Tokens: []string{strings.Repeat("b", 32)}}}
 		}, "at least one namespace"},
