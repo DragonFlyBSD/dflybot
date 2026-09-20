@@ -57,6 +57,9 @@ type ConfigRepo struct {
 	IssueActions []string `toml:"issue_actions" validate:"omitempty,dive,oneof=create comment close reopen"`
 	// Pull request actions to announce; empty means all supported actions.
 	PRActions []string `toml:"pr_actions" validate:"omitempty,dive,oneof=create comment update close merge reopen"`
+	// User logins whose actions are not announced (e.g. a CI bot); empty
+	// means no user is ignored.  GitHub logins are case-insensitive.
+	IgnoredUsers []string `toml:"ignored_users" validate:"omitempty,dive,required"`
 	// Poll interval in seconds.
 	Interval int `toml:"interval" validate:"required,min=1"`
 }

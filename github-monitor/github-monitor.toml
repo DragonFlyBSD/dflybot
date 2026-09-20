@@ -24,6 +24,9 @@ issue_actions = []
 # Pull request actions to announce; empty means all supported actions
 # (create, comment, update, close, merge, reopen).
 pr_actions = []
+# User logins whose actions are ignored (e.g. a CI bot that generates many
+# events); empty means no user is ignored.  Matching is case-insensitive.
+# ignored_users = ["dragonflybot"]
 # Poll interval in seconds.
 interval = 60
 

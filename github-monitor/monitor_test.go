@@ -373,6 +373,73 @@ func closeEvent(id string) string {
 	return strings.Replace(eventJSON("IssuesEvent", id, "closed"), `"state":"open"`, `"state":"closed"`, 1)
 }
 
+// TestMonitorIgnoreUsers verifies that actions by ignored users are dropped
+// while other users' actions are still announced, and that the ignored
+// events still advance the watermark (no re-processing).
+func TestMonitorIgnoreUsers(t *testing.T) {
+	const (
+		t0 = "2026-09-06T10:00:00Z"
+		t1 = "2026-09-06T10:01:00Z"
+	)
+	stub := &eventsStub{}
+	stub.setEvents(`"e0"`, []string{openEventAt("1", t0)})
+	ts := httptest.NewServer(stub.handler())
+	defer ts.Close()
+
+	poster := &recordPoster{}
+	cfg := defaultRepo()
+	cfg.IgnoredUsers = []string{"aly"} // openEvent/closeEvent are authored by aly
+	m, _ := newTestMonitor(t, ts, cfg, poster)
+	m.poll() // seed
+
+	// An ignored issue event and a comment by another user (zoe) in the
+	// same second: only the comment is announced.
+	stub.setEvents(`"e1"`, []string{commentAt("14550033122", t1), openEventAt("2", t1)})
+	m.poll()
+	msgs := poster.messages()
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "zoe commented on issue #12") {
+		t.Fatalf("messages = %v", msgs)
+	}
+
+	// A redelivery with a new etag must not re-announce the ignored event.
+	stub.setEvents(`"e2"`, []string{commentAt("14550033122", t1), openEventAt("2", t1)})
+	m.poll()
+	if got := poster.messages(); len(got) != 1 {
+		t.Fatalf("ignored event re-processed: %v", got)
+	}
+}
+
+// TestMonitorIgnoreUsersSkipsPRFetch verifies that an ignored PR event does
+// not trigger the extra full-PR API request.
+func TestMonitorIgnoreUsersSkipsPRFetch(t *testing.T) {
+	abbrevPR := `{"url":"$BASE$/repos/o/r/pulls/1668","id":1,"number":1668}`
+	prEvent := fmt.Sprintf(`{"id":"14672578728","type":"PullRequestEvent",
+		"created_at":"2026-09-08T23:59:31Z","actor":{"login":"somebot"},
+		"payload":{"action":"opened","pull_request":%s}}`, abbrevPR)
+	fullPR := `{"url":"$BASE$/repos/o/r/pulls/1668","number":1668,
+		"title":"x","html_url":"https://github.com/o/r/pull/1668"}`
+
+	stub := &eventsAndRefStub{fullPR: fullPR}
+	stub.setEvents(`"e0"`, []string{openEventAt("0", "2026-09-08T23:00:00Z")})
+	ts := httptest.NewServer(stub.handler())
+	defer ts.Close()
+
+	poster := &recordPoster{}
+	cfg := defaultRepo()
+	cfg.IgnoredUsers = []string{"somebot"}
+	m, _ := newTestMonitor(t, ts, cfg, poster)
+	m.poll() // seed
+
+	stub.setEvents(`"e1"`, []string{prEvent})
+	m.poll()
+	if got := poster.messages(); len(got) != 0 {
+		t.Fatalf("ignored PR announced: %v", got)
+	}
+	if stub.refGot != 0 {
+		t.Errorf("full PR fetches = %d, want 0", stub.refGot)
+	}
+}
+
 func TestMonitorBatching(t *testing.T) {
 	stub := &eventsStub{}
 	ts := httptest.NewServer(stub.handler())

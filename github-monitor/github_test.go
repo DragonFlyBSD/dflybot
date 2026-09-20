@@ -129,6 +129,34 @@ func TestActionWanted(t *testing.T) {
 	}
 }
 
+func TestUserIgnored(t *testing.T) {
+	tests := []struct {
+		login string
+		list  []string
+		want  bool
+	}{
+		{"aly", []string{"aly"}, true},
+		{"ALY", []string{"aly"}, true}, // case-insensitive
+		{"aly", []string{"bob"}, false},
+		{"", []string{"aly"}, false},
+		{"aly", nil, false},
+	}
+	for _, tt := range tests {
+		if got := userIgnored(tt.login, tt.list); got != tt.want {
+			t.Errorf("userIgnored(%q, %v) = %v, want %v", tt.login, tt.list, got, tt.want)
+		}
+	}
+}
+
+func TestClassifyIgnoredUser(t *testing.T) {
+	// eventJSON always uses actor "aly".
+	mon := NewRepoMonitor(&ConfigRepo{Project: "o", Repo: "r",
+		IgnoredUsers: []string{"ALY"}}, nil, nil, t.TempDir(), nil)
+	if _, ok := mon.classify(decodeEvent(t, eventJSON("IssuesEvent", "1", "opened"))); ok {
+		t.Error("event from an ignored user was classified")
+	}
+}
+
 func TestGetRef(t *testing.T) {
 	pr := `{"url":"https://api.github.com/repos/o/r/pulls/9","id":1,"number":9,
 		"state":"open","title":"fix foo","html_url":"https://github.com/o/r/pull/9",

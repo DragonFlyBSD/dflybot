@@ -67,6 +67,20 @@ func actionWanted(kind, action string, issueActions, prActions []string) bool {
 	return contains(list, action)
 }
 
+// userIgnored reports whether login is in the ignored-users list.  GitHub
+// logins are case-insensitive, so the comparison ignores case.
+func userIgnored(login string, ignored []string) bool {
+	if login == "" {
+		return false
+	}
+	for _, u := range ignored {
+		if strings.EqualFold(u, login) {
+			return true
+		}
+	}
+	return false
+}
+
 // activity is one announced event.
 type activity struct {
 	kind    string // "issue" | "PR"
@@ -213,7 +227,8 @@ func (m *RepoMonitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 
 	m.loadState()
 	m.logger.Info("github repo monitor started",
-		"interval", m.cfg.Interval, "last_event_at", m.state.LastEventAt)
+		"interval", m.cfg.Interval, "last_event_at", m.state.LastEventAt,
+		"ignored_users", m.cfg.IgnoredUsers)
 
 	monitor.Loop(ctx, time.Duration(m.cfg.Interval)*time.Second, m.poll)
 	m.logger.Debug("repo monitor exiting")
@@ -340,6 +355,11 @@ func (m *RepoMonitor) poll() {
 
 // classify maps an event to an activity, honoring the configured actions.
 func (m *RepoMonitor) classify(e *ghEvent) (*activity, bool) {
+	if userIgnored(e.Actor.Login, m.cfg.IgnoredUsers) {
+		m.logger.Debug("event ignored by user", "user", e.Actor.Login, "type", e.Type)
+		return nil, false
+	}
+
 	var a *activity
 	switch e.Type {
 	case "IssuesEvent":
