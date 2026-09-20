@@ -234,9 +234,10 @@ func ValidateKey(key string) error {
 			return fmt.Errorf("key segment %q must not start with . or ~", seg)
 		}
 	}
-	switch key {
-	case "/robots.txt", "/favicon.ico":
-		return fmt.Errorf("key %q is reserved", key)
+	for _, k := range reservedExactKeys {
+		if key == k {
+			return fmt.Errorf("key %q is reserved", key)
+		}
 	}
 	return nil
 }

@@ -7,10 +7,53 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 )
+
+func TestAPIIndex(t *testing.T) {
+	e := newTestEnv(t)
+	for _, path := range []string{apiBase, apiPrefix} {
+		rec := e.request(http.MethodGet, path, "", nil, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d", path, rec.Code)
+		}
+		var body struct {
+			Name      string `json:"name"`
+			Version   string `json:"version"`
+			Endpoints []struct {
+				Method string `json:"method"`
+				Path   string `json:"path"`
+			} `json:"endpoints"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		if body.Name != programName || body.Version != version {
+			t.Errorf("GET %s: name/version = %q/%q", path, body.Name, body.Version)
+		}
+		if len(body.Endpoints) != len(apiEndpoints) {
+			t.Errorf("GET %s: %d endpoints, want %d", path, len(body.Endpoints), len(apiEndpoints))
+		}
+	}
+}
+
+// TestAPIIndexCoversRoutes guards against the index drifting from the routes
+// actually handled by handleAPI.
+func TestAPIIndexCoversRoutes(t *testing.T) {
+	e := newTestEnv(t)
+	for _, ep := range apiEndpoints {
+		if !isAPIPath(ep.Path) {
+			t.Errorf("%s %s: not an API path", ep.Method, ep.Path)
+		}
+		rec := e.request(ep.Method, ep.Path, testAdminToken, nil, nil)
+		if rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed {
+			t.Errorf("%s %s = %d", ep.Method, ep.Path, rec.Code)
+		}
+	}
+}
 
 func TestAPIHealthAndAuth(t *testing.T) {
 	e := newTestEnv(t)

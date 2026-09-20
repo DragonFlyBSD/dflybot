@@ -30,6 +30,7 @@ const (
 	AccessTypeRedirect = "redirect"
 	AccessTypeAPI      = "api"
 	AccessTypeACME     = "acme"
+	AccessTypeHome     = "home"
 )
 
 // AccessEntry is one JSONL record.

@@ -97,10 +97,12 @@ production incidents. Implement and test each one explicitly.
 - **C9. Hash extension never mutates existing keys.** Resolve and insert inside
   one bbolt `Update` transaction. Once a key is published it must remain
   stable forever.
-- **C10. Reserved namespace.** `/.api`, `/.well-known/`, `/robots.txt`, and
-  `/favicon.ico` are reserved. Rule and explicit keys may not contain a path
-  segment starting with `.` or `~`, and may not equal `/robots.txt` or
-  `/favicon.ico`; random keys always start a segment with `~`.
+- **C10. Reserved namespace.** `/.api`, `/.well-known/`, `/` (the home page),
+  `/robots.txt`, and `/favicon.ico` are reserved. Rule and explicit keys may
+  not contain a path segment starting with `.` or `~`, and may not equal `/`,
+  `/robots.txt`, or `/favicon.ico`; random keys always start a segment with
+  `~`. An existing `/` link is shadowed by the home page and becomes
+  unreachable.
 - **C11. No synchronous hit counter.** Redirects must not write to bbolt.
   Derive hit counts from access logs if ever needed.
 - **C12. Constant-time token comparison.** Hash presented and configured tokens
@@ -164,6 +166,10 @@ production incidents. Implement and test each one explicitly.
 - **C26. HSTS is opt-in and HTTPS-only.** `server.hsts.enabled` (default false)
   requires `https_port > 0`; the header is only set on HTTPS responses.
   `preload` requires `include_subdomains = true` and `max_age >= 31536000`.
+- **C27. Home page and API index.** `GET /` returns the program name and
+  version plus a link to the API; `/` is therefore reserved (C10).
+  `GET /.api/v1` (and `/.api/v1/`) returns an unauthenticated JSON index that
+  lists the method and path of every API operation.
 
 ---
 
@@ -199,8 +205,9 @@ Single process, several long-lived components plus logging:
              +---------------------+
 ```
 
-- `/health` (unauthenticated) and `/.api/v1/status` (admin) live under the API
-  mux.
+- `GET /` serves the home page; `GET /.api/v1` serves the API index (both
+  unauthenticated). `/health` is also unauthenticated; other API endpoints
+  authenticate.
 - The redirect path is read-only: one `db.View` per request, no writes.
 - Links are created/updated/deleted only through the API, in `db.Update`
   transactions.
@@ -351,7 +358,7 @@ key   = "/gh/{{ abbrev .org }}/i/{{ .num }}"
 
 [[rules]]
 name     = "gitweb-commit"
-match    = '''^https://gitweb\.dragonflybsd\.org/(?P<repo>[^/]+?)(?:\.git)?/commitdiff/(?P<sha>[0-9a-f]{40})$'''
+match    = '''^https://gitweb\.dragonflybsd\.org/(?P<repo>[^/]+?)(?:\.git)?/(?:commit|commitdiff)/(?P<sha>[0-9a-f]{40})$'''
 key      = "/g/{{ abbrev .repo }}/{{ .sha }}"
 hash        = "sha"   # capture group to auto-extend for uniqueness
 hash_minlen = 8       # minimum prefix length (>= 4)
@@ -626,7 +633,7 @@ After rendering, validate:
 - no `..` segment;
 - no `%`, `?`, `#`, whitespace, or control characters;
 - no path segment starts with `.` or `~` (C10);
-- not exactly `/robots.txt` or `/favicon.ico` (reserved static paths, C10).
+- not exactly `/`, `/robots.txt`, or `/favicon.ico` (reserved paths, C10).
 
 Rules that generate invalid or too-long keys are treated as operator errors:
 `500` on create, with the rule name and rendered key in the server log.
@@ -694,11 +701,13 @@ When no rule matches:
 
 Order matters:
 
-1. `/.api/...` -> API mux (auth).
+1. `/.api/...` -> API mux. `GET /.api/v1` (and `/.api/v1/`) returns the
+   unauthenticated API index; all other endpoints authenticate.
 2. `/.well-known/...` -> `404`.
-3. `/robots.txt` -> `200`, body `User-agent: *\nDisallow: /\n` (GET/HEAD only).
-4. `/favicon.ico` -> `204` (GET/HEAD only).
-5. anything else -> redirect handler.
+3. `/` -> `200` home page (GET/HEAD only).
+4. `/robots.txt` -> `200`, body `User-agent: *\nDisallow: /\n` (GET/HEAD only).
+5. `/favicon.ico` -> `204` (GET/HEAD only).
+6. anything else -> redirect handler.
 
 ### 9.5 Redirect handler
 
@@ -716,12 +725,13 @@ Order matters:
 
 ## 10. REST API
 
-Base path `/.api/v1`. All endpoints except `/health` require
+Base path `/.api/v1`. All endpoints except `/health` and the API index require
 `Authorization: Bearer <token>`. JSON in and out. Body limit 64 KiB,
 `DisallowUnknownFields`.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
+| GET | `/.api/v1` | none | API index (name, version, method/path of every operation) |
 | GET | `/health` | none | liveness |
 | GET | `/status` | admin | status and statistics |
 | GET | `/whoami` | any | caller identity |
@@ -1002,7 +1012,7 @@ that the operator owns renewal.
  "bytes":0}
 ```
 
-- `type` is `redirect`, `api`, or `acme`.
+- `type` is `redirect`, `api`, `acme`, or `home`.
 - API records include `client` and `action` (`create`, `update`, `delete`,
   `resolve`, `status`); request bodies are never logged.
 - `remote_ip` is the trusted-proxy-aware client IP (C13, C25).

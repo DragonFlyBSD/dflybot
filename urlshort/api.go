@@ -36,6 +36,31 @@ const (
 	apiPathLinks  = apiBase + "/links"
 )
 
+// isAPIPath reports whether p targets the API tree, including apiBase itself
+// (the API index).
+func isAPIPath(p string) bool {
+	return p == apiBase || strings.HasPrefix(p, apiPrefix)
+}
+
+// apiEndpoint is one operation listed by the API index.
+type apiEndpoint struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
+}
+
+// apiEndpoints lists every supported API operation. Keep it in sync with the
+// dispatch in handleAPI.
+var apiEndpoints = []apiEndpoint{
+	{http.MethodGet, apiBase},
+	{http.MethodGet, apiPathHealth},
+	{http.MethodGet, apiPathStatus},
+	{http.MethodGet, apiPathWhoami},
+	{http.MethodPost, apiPathLinks},
+	{http.MethodGet, apiPathLinks},
+	{http.MethodPut, apiPathLinks},
+	{http.MethodDelete, apiPathLinks},
+}
+
 // ---------------------------------------------------------------------------
 // JSON helpers
 
@@ -111,6 +136,8 @@ func requireMethod(w http.ResponseWriter, r *http.Request, methods ...string) bo
 
 func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
+	case apiBase, apiPrefix:
+		s.handleAPIIndex(w, r)
 	case apiPathHealth:
 		if !requireMethod(w, r, http.MethodGet) {
 			return
@@ -186,6 +213,17 @@ func (s *Server) allowAPI(w http.ResponseWriter, c *Client) bool {
 
 // ---------------------------------------------------------------------------
 // Simple endpoints
+
+func (s *Server) handleAPIIndex(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Name      string        `json:"name"`
+		Version   string        `json:"version"`
+		Endpoints []apiEndpoint `json:"endpoints"`
+	}{programName, version, apiEndpoints})
+}
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

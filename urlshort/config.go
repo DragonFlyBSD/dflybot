@@ -671,7 +671,7 @@ func isASCII(s string) bool {
 var (
 	namespaceRe       = regexp.MustCompile(`^(?:/[A-Za-z0-9_-][A-Za-z0-9._~-]*)+/$`)
 	reservedPrefixes  = []string{apiRoot, "/.well-known/"}
-	reservedExactKeys = []string{"/robots.txt", "/favicon.ico"}
+	reservedExactKeys = []string{"/", "/robots.txt", "/favicon.ico"}
 )
 
 // validNamespace reports whether ns is a well-formed, non-reserved namespace

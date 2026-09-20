@@ -463,7 +463,7 @@ func (s *Server) bodyLimitMiddleware(next http.Handler) http.Handler {
 	const maxAPIBodyBytes = 64 * 1024 // 64KB
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, apiPrefix) {
+		if isAPIPath(r.URL.Path) {
 			r.Body = http.MaxBytesReader(w, r.Body, maxAPIBodyBytes)
 		}
 		next.ServeHTTP(w, r)
@@ -472,7 +472,7 @@ func (s *Server) bodyLimitMiddleware(next http.Handler) http.Handler {
 
 func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, apiPrefix) {
+		if isAPIPath(r.URL.Path) {
 			// API rate limiting is per token and happens after authentication.
 			next.ServeHTTP(w, r)
 			return
@@ -541,6 +541,8 @@ func classifyAccessType(path string) string {
 		return AccessTypeACME
 	case strings.HasPrefix(path, apiRoot):
 		return AccessTypeAPI
+	case path == "/":
+		return AccessTypeHome
 	default:
 		return AccessTypeRedirect
 	}
@@ -580,10 +582,12 @@ func (r *statusRecorder) Flush() {
 func (s *Server) routeMain(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	switch {
-	case strings.HasPrefix(p, apiPrefix):
+	case isAPIPath(p):
 		s.handleAPI(w, r)
 	case strings.HasPrefix(p, "/.well-known/"):
 		writePlainError(w, http.StatusNotFound, "404 page not found")
+	case p == "/":
+		s.handleHome(w, r)
 	case p == "/robots.txt":
 		if !requireGetHead(w, r) {
 			return

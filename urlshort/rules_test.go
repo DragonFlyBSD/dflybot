@@ -164,13 +164,13 @@ func TestRuleGitwebCommitPaths(t *testing.T) {
 }
 
 func TestValidateKey(t *testing.T) {
-	valid := []string{"/", "/a", "/g/d/728aaaa", "/a-b_c.d", "/gh/dfbsd/p/56"}
+	valid := []string{"/a", "/g/d/728aaaa", "/a-b_c.d", "/gh/dfbsd/p/56"}
 	for _, k := range valid {
 		if err := ValidateKey(k); err != nil {
 			t.Errorf("%q: unexpected error %v", k, err)
 		}
 	}
-	invalid := []string{"", "a", "/a b", "/a?b", "/a#b", "/a%b", "/../x", "/a/./b", "/a/~x", "/a/..", "/robots.txt", "/favicon.ico", strings.Repeat("/a", 200)}
+	invalid := []string{"", "/", "a", "/a b", "/a?b", "/a#b", "/a%b", "/../x", "/a/./b", "/a/~x", "/a/..", "/robots.txt", "/favicon.ico", strings.Repeat("/a", 200)}
 	for _, k := range invalid {
 		if err := ValidateKey(k); err == nil {
 			t.Errorf("%q: expected error", k)
