@@ -161,7 +161,7 @@ func TestValidationFailures(t *testing.T) {
 
 func TestValidateNamespace(t *testing.T) {
 	valid := []string{"/g/", "/gh/", "/a/b/", "/git-1/"}
-	invalid := []string{"", "g", "/g", "g/", "/g//", "/../", "/.api/", "/.well-known/", "/~x/", "/a/./"}
+	invalid := []string{"", "g", "/g", "g/", "/g//", "/../", apiRoot, "/.well-known/", "/~x/", "/a/./"}
 	for _, ns := range valid {
 		if !validNamespace(ns) {
 			t.Errorf("expected %q valid", ns)

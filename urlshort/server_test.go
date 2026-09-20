@@ -123,10 +123,10 @@ func TestRateLimit(t *testing.T) {
 
 	// API rate limit is per token.
 	e.srv.apiLimiter = NewRateLimiter(0.000001, 1, 100)
-	if rec := e.request(http.MethodGet, "/.api/v1/whoami", testGitToken, nil, nil); rec.Code != 200 {
+	if rec := e.request(http.MethodGet, apiPathWhoami, testGitToken, nil, nil); rec.Code != 200 {
 		t.Fatalf("first api = %d", rec.Code)
 	}
-	rec = e.request(http.MethodGet, "/.api/v1/whoami", testGitToken, nil, nil)
+	rec = e.request(http.MethodGet, apiPathWhoami, testGitToken, nil, nil)
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("second api = %d, want 429", rec.Code)
 	}

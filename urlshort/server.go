@@ -56,7 +56,7 @@ type CertInfo struct {
 	DaysLeft  int       `json:"days_left"`
 }
 
-// StatusState is the mutable state exposed by GET /.api/v1/status.
+// StatusState is the mutable state exposed by the health API.
 type StatusState struct {
 	mu         sync.Mutex
 	startedAt  time.Time
@@ -472,7 +472,7 @@ func (s *Server) bodyLimitMiddleware(next http.Handler) http.Handler {
 
 func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/.api/v1/") {
+		if strings.HasPrefix(r.URL.Path, apiPrefix) {
 			// API rate limiting is per token and happens after authentication.
 			next.ServeHTTP(w, r)
 			return
@@ -539,7 +539,7 @@ func classifyAccessType(path string) string {
 	switch {
 	case strings.HasPrefix(path, "/.well-known/acme-challenge/"):
 		return AccessTypeACME
-	case strings.HasPrefix(path, "/.api/"):
+	case strings.HasPrefix(path, apiRoot):
 		return AccessTypeAPI
 	default:
 		return AccessTypeRedirect
@@ -580,7 +580,7 @@ func (r *statusRecorder) Flush() {
 func (s *Server) routeMain(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	switch {
-	case strings.HasPrefix(p, "/.api/v1/"):
+	case strings.HasPrefix(p, apiPrefix):
 		s.handleAPI(w, r)
 	case strings.HasPrefix(p, "/.well-known/"):
 		writePlainError(w, http.StatusNotFound, "404 page not found")

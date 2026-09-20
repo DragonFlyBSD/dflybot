@@ -41,7 +41,7 @@ func TestHTTP2OverTLS(t *testing.T) {
 				TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
 				ForceAttemptHTTP2: true,
 			}}
-			resp, err := client.Get("https://" + ln.Addr().String() + "/.api/v1/health")
+			resp, err := client.Get("https://" + ln.Addr().String() + apiPathHealth)
 			if err != nil {
 				t.Fatal(err)
 			}

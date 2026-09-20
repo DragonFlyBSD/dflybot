@@ -21,7 +21,14 @@ import (
 )
 
 const (
-	apiBase = "/.api/v1"
+	// apiRoot is the reserved parent of every API version. Namespaces, link
+	// keys, and redirects must never use it as a prefix.
+	apiRoot = "/.api/"
+
+	// apiBase is the versioned API base; apiPrefix is apiBase with the
+	// trailing slash used for prefix matching.
+	apiBase   = apiRoot + "v1"
+	apiPrefix = apiBase + "/"
 
 	apiPathHealth = apiBase + "/health"
 	apiPathStatus = apiBase + "/status"
