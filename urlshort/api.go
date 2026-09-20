@@ -228,14 +228,11 @@ type createResponse struct {
 	Created bool `json:"created"`
 }
 
-func (s *Server) publicBase() string {
-	return strings.TrimRight(s.cfg.PublicURL().String(), "/")
-}
-
 func (s *Server) linkView(l *Link) linkView {
+	base := s.cfg.PublicURL()
 	return linkView{
 		Key:       l.Key,
-		ShortURL:  s.publicBase() + l.Key,
+		ShortURL:  base.JoinPath(l.Key).String(),
 		Target:    l.Target,
 		Rule:      l.Rule,
 		CreatedAt: l.CreatedAt,
@@ -657,6 +654,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 	prewarmOK, prewarmAt, prewarmErr := s.status.Prewarm()
+	logsStat := AccessLogStats{}
+	if s.logs != nil {
+		logsStat = s.logs.Stats()
+	}
 
 	resp := statusResponse{
 		Version:       version,
@@ -681,7 +682,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			Namespaces: namespaces,
 		},
 		Clients:   clients,
-		AccessLog: accessLogStatsOrZero(s.logs),
+		AccessLog: logsStat,
 		DB: statusDB{
 			FileSizeBytes: dbStats.FileSizeBytes,
 			TxStats: statusTxStats{
@@ -709,11 +710,4 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp.LastError = &statusError{Time: t, Message: msg}
 	}
 	writeJSON(w, http.StatusOK, resp)
-}
-
-func accessLogStatsOrZero(l *AccessLogger) AccessLogStats {
-	if l == nil {
-		return AccessLogStats{}
-	}
-	return l.Stats()
 }

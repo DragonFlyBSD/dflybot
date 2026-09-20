@@ -74,9 +74,6 @@ func NewRuleset(cfgs []RuleConfig, abbrev map[string]string) (*Ruleset, error) {
 	return rs, nil
 }
 
-// Len returns the number of compiled rules.
-func (rs *Ruleset) Len() int { return len(rs.rules) }
-
 // Match returns the first rule whose pattern matches the whole target, plus its
 // named capture groups.
 func (rs *Ruleset) Match(target string) (*Rule, map[string]string, bool) {
@@ -125,7 +122,8 @@ func (r *Rule) GenerateKey(vars map[string]string, isFree func(string) (bool, er
 			return "", err
 		}
 		if !free {
-			return "", fmt.Errorf("%w: rule %q: key %q already exists for another target", ErrConflict, r.Name, key)
+			return "", fmt.Errorf("%w: rule %q: key %q already exists for another target",
+				ErrConflict, r.Name, key)
 		}
 		return key, nil
 	}
@@ -139,7 +137,8 @@ func (r *Rule) GenerateKey(vars map[string]string, isFree func(string) (bool, er
 		minlen = 4
 	}
 	if minlen > len(hashVal) {
-		return "", fmt.Errorf("rule %q: hash_minlen %d exceeds hash value length %d", r.Name, minlen, len(hashVal))
+		return "", fmt.Errorf("rule %q: hash_minlen %d exceeds hash value length %d",
+			r.Name, minlen, len(hashVal))
 	}
 	for l := minlen; l <= len(hashVal); l++ {
 		v := make(map[string]string, len(vars))
@@ -242,18 +241,18 @@ func ValidateKey(key string) error {
 	return nil
 }
 
-const base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-
 // randomID returns n base62 characters from crypto/rand.
 func randomID(n int) (string, error) {
+	const base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
 	buf := make([]byte, n)
 	for i := 0; i < n; {
 		var b [1]byte
 		if _, err := rand.Read(b[:]); err != nil {
 			return "", err
 		}
-		// Reject the 8 values that would bias the modulo 62.
-		if b[0] >= 248 {
+		// Reject the extra values that would bias the modulo 62.
+		if b[0] >= 62*4 {
 			continue
 		}
 		buf[i] = base62Alphabet[int(b[0])%62]

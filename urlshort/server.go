@@ -418,9 +418,8 @@ func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
 			id = newRequestID()
 		}
 		w.Header().Set("X-Request-ID", id)
-		ai := &accessInfo{}
 		ctx := context.WithValue(r.Context(), requestIDKey, id)
-		ctx = context.WithValue(ctx, accessInfoKey, ai)
+		ctx = context.WithValue(ctx, accessInfoKey, &accessInfo{})
 		ctx = context.WithValue(ctx, clientIPKey, s.clientIP(r))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -460,11 +459,11 @@ func (s *Server) hostCheckMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-const maxAPIBodyBytes = 64 * 1024 // 64KB
-
 func (s *Server) bodyLimitMiddleware(next http.Handler) http.Handler {
+	const maxAPIBodyBytes = 64 * 1024 // 64KB
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/.api/v1/") {
+		if strings.HasPrefix(r.URL.Path, apiPrefix) {
 			r.Body = http.MaxBytesReader(w, r.Body, maxAPIBodyBytes)
 		}
 		next.ServeHTTP(w, r)
