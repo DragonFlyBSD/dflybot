@@ -39,28 +39,26 @@ func TestValidConfig(t *testing.T) {
 
 func TestDerivedDefaults(t *testing.T) {
 	c := baseConfig()
-	c.DataDir = "/var/lib/urlshort/"
+	c.DataDir = "/var/lib/urlshort"
 	if err := c.applyDerivedDefaults(); err != nil {
 		t.Fatalf("applyDerivedDefaults: %v", err)
 	}
-	if c.ACME.CacheDir != "/var/lib/urlshort/acme/" {
+	if c.ACME.CacheDir != "/var/lib/urlshort/acme" {
 		t.Errorf("cache dir = %q", c.ACME.CacheDir)
 	}
-	if c.Backup.Dir != "/var/lib/urlshort/backup/" {
+	if c.Backup.Dir != "/var/lib/urlshort/backup" {
 		t.Errorf("backup dir = %q", c.Backup.Dir)
 	}
-	if c.LogsDir() != "/var/lib/urlshort/logs/" {
+	if c.LogsDir() != "/var/lib/urlshort/logs" {
 		t.Errorf("logs dir = %q", c.LogsDir())
 	}
 }
 
 func TestDerivedDefaultsRejectsDataDir(t *testing.T) {
-	for _, dd := range []string{"", "data"} {
-		c := baseConfig()
-		c.DataDir = dd
-		if err := c.applyDerivedDefaults(); err == nil {
-			t.Errorf("data_dir %q: expected error", dd)
-		}
+	c := baseConfig()
+	c.DataDir = ""
+	if err := c.applyDerivedDefaults(); err == nil {
+		t.Errorf("data_dir %q: expected error", c.DataDir)
 	}
 }
 
@@ -74,7 +72,6 @@ func TestValidationFailures(t *testing.T) {
 		{"ports zero", func(c *Config) { c.Server.HTTPPort = 0; c.Server.HTTPSPort = 0 }, "at least one"},
 		{"public url missing", func(c *Config) { c.Server.PublicURL = "" }, "public_url"},
 		{"public url scheme", func(c *Config) { c.Server.PublicURL = "ftp://example.com" }, "scheme"},
-		{"public url trailing slash", func(c *Config) { c.Server.PublicURL = "https://example.com/" }, "slash"},
 		{"public url path", func(c *Config) { c.Server.PublicURL = "https://example.com/x" }, "path"},
 		{"public url userinfo", func(c *Config) { c.Server.PublicURL = "https://u@example.com" }, "userinfo"},
 		{"public url query", func(c *Config) { c.Server.PublicURL = "https://example.com?x=1" }, "query"},
@@ -96,7 +93,7 @@ func TestValidationFailures(t *testing.T) {
 		{"renew days", func(c *Config) { c.ACME.RenewBeforeDays = 0 }, "renew_before_days"},
 		{"issue timeout", func(c *Config) { c.ACME.IssueTimeout = 0 }, "issue_timeout"},
 		{"read timeout", func(c *Config) { c.Server.ReadTimeout = 0 }, "read_timeout"},
-		{"max header", func(c *Config) { c.Server.MaxHeaderBytes = 1024 }, "max_header_bytes"},
+		{"max header", func(c *Config) { c.Server.MaxHeaderBytes = 0 }, "max_header_bytes"},
 		{"backup hour", func(c *Config) { c.Backup.HourUTC = 24 }, "hour_utc"},
 		{"backup retention", func(c *Config) { c.Backup.RetentionDays = -1 }, "retention_days"},
 		{"backup tx", func(c *Config) { c.Backup.CompactTxMaxBytes = 0 }, "compact_tx_max_bytes"},
@@ -115,6 +112,12 @@ func TestValidationFailures(t *testing.T) {
 		{"rule key prefix", func(c *Config) {
 			c.Rules = []RuleConfig{{Name: "r", Match: `^https://a$`, Key: "a"}}
 		}, "must start with /"},
+		{"rule key template", func(c *Config) {
+			c.Rules = []RuleConfig{{Name: "r", Match: `^https://a$`, Key: `/a/{{template "xxx" ...`}}
+		}, "template/define/block actions are not allowed"},
+		{"rule key block", func(c *Config) {
+			c.Rules = []RuleConfig{{Name: "r", Match: `^https://a$`, Key: `/a/{{- block "xxx" ...`}}
+		}, "template/define/block actions are not allowed"},
 		{"rule hash group", func(c *Config) {
 			c.Rules = []RuleConfig{{Name: "r", Match: `^https://a/(?P<x>x)$`, Key: "/a/{{ .x }}", Hash: "y", HashMinlen: 8}}
 		}, "capture group"},

@@ -51,7 +51,7 @@ func newTestEnvWith(t *testing.T, mutate func(*Config)) *testEnv {
 	}
 
 	cfg := DefaultConfig()
-	cfg.DataDir = dir + "/"
+	cfg.DataDir = dir
 	cfg.Server.PublicURL = "https://example.com"
 	cfg.Server.HTTPPort = 80
 	cfg.Server.HTTPSPort = 443
@@ -60,11 +60,16 @@ func newTestEnvWith(t *testing.T, mutate func(*Config)) *testEnv {
 	cfg.Server.ExtraHosts = []string{"www.example.com"}
 	cfg.ACME.Enabled = false
 	cfg.Backup.Enabled = false
-	cfg.Access.RedirectRate = 10000
-	cfg.Access.RedirectBurst = 10000
-	cfg.Access.APIRate = 10000
-	cfg.Access.APIBurst = 10000
-	cfg.Abbreviations = map[string]string{"DragonFlyBSD": "dfbsd", "dragonfly": "d"}
+	cfg.RateLimit = RateLimitConfig{
+		RedirectRate:  10000,
+		RedirectBurst: 10000,
+		APIRate:       10000,
+		APIBurst:      10000,
+	}
+	cfg.Abbreviations = map[string]string{
+		"DragonFlyBSD": "dfbsd",
+		"dragonfly":    "d",
+	}
 	cfg.Rules = []RuleConfig{
 		{
 			Name:  "github-pr",

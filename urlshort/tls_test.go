@@ -122,7 +122,7 @@ func TestManualCertManager(t *testing.T) {
 	}
 
 	cfg := DefaultConfig()
-	cfg.DataDir = dir + "/"
+	cfg.DataDir = dir
 	cfg.Server.PublicURL = "https://example.com"
 	cfg.Server.HTTPSPort = 443
 	cfg.Server.CertFile = certPath

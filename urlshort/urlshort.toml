@@ -1,12 +1,7 @@
-# urlshort sample configuration.
-#
-# Replace every "???" token before use and keep this file mode 0600: it
-# contains plaintext secrets.
-
 # Application log level: debug, info, warn, error
 log_level = "info"
 
-# Storage root. Must end with a slash.
+# Storage root.
 # Contains: links.db, acme/, backup/, logs/access-YYYY-MM-DD.jsonl
 data_dir = "./data/"
 
@@ -89,7 +84,7 @@ http01_fallback = false
 # Timeout for each ACME HTTP request (not the whole issuance order).
 issue_timeout = 60
 
-[access]
+[rate_limit]
 # Per-source-IP limits for redirects (IPv4 /32, IPv6 /64), and per-token
 # limits for the API. Allowed rates are in requests/second.
 redirect_rate  = 20

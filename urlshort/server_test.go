@@ -162,7 +162,7 @@ func TestNewServerAccessLogFailure(t *testing.T) {
 	}
 
 	cfg := DefaultConfig()
-	cfg.DataDir = blocker + "/" // LogsDir() cannot be created
+	cfg.DataDir = blocker // LogsDir() cannot be created
 
 	store, err := OpenBoltStore(filepath.Join(dir, "links.db"), 1<<20)
 	if err != nil {

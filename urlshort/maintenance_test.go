@@ -30,7 +30,7 @@ func newTestMaintenance(t *testing.T, store Store, now func() time.Time) *Mainte
 	t.Helper()
 	dir := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.DataDir = dir + "/"
+	cfg.DataDir = dir
 	cfg.Server.PublicURL = "https://example.com"
 	cfg.Server.HTTPPort = 80
 	cfg.Server.HTTPSPort = 0

@@ -40,7 +40,7 @@ type Config struct {
 
 	Server        ServerConfig      `toml:"server"`
 	ACME          ACMEConfig        `toml:"acme"`
-	Access        AccessConfig      `toml:"access"`
+	RateLimit     RateLimitConfig   `toml:"rate_limit"`
 	AccessLog     AccessLogConfig   `toml:"access_log"`
 	Backup        BackupConfig      `toml:"backup"`
 	Abbreviations map[string]string `toml:"abbreviations"`
@@ -117,8 +117,8 @@ type ACMEConfig struct {
 	AccountKey crypto.Signer `toml:"-"`
 }
 
-// AccessConfig holds the rate limiting configuration.
-type AccessConfig struct {
+// RateLimitConfig holds the rate limiting configuration.
+type RateLimitConfig struct {
 	RedirectRate  float64 `toml:"redirect_rate"`
 	RedirectBurst int     `toml:"redirect_burst"`
 	APIRate       float64 `toml:"api_rate"`
@@ -166,6 +166,7 @@ type ClientConfig struct {
 const (
 	defaultDirectoryURL = "https://acme-v02.api.letsencrypt.org/directory"
 	tokenMinLen         = 32
+	hashMinLen          = 4
 )
 
 // DefaultConfig returns a configuration with the documented defaults. Decoding
@@ -196,7 +197,7 @@ func DefaultConfig() *Config {
 			RenewBeforeDays: 30,
 			IssueTimeout:    60,
 		},
-		Access: AccessConfig{
+		RateLimit: RateLimitConfig{
 			RedirectRate:  20,
 			RedirectBurst: 40,
 			APIRate:       5,
@@ -251,14 +252,11 @@ func (c *Config) applyDerivedDefaults() error {
 	if c.DataDir == "" {
 		return errors.New("data_dir must not be empty")
 	}
-	if !strings.HasSuffix(c.DataDir, "/") {
-		return fmt.Errorf("data_dir %q must end with a slash", c.DataDir)
-	}
 	if c.ACME.CacheDir == "" {
-		c.ACME.CacheDir = filepath.Join(c.DataDir, "acme") + "/"
+		c.ACME.CacheDir = filepath.Join(c.DataDir, "acme")
 	}
 	if c.Backup.Dir == "" {
-		c.Backup.Dir = filepath.Join(c.DataDir, "backup") + "/"
+		c.Backup.Dir = filepath.Join(c.DataDir, "backup")
 	}
 	return nil
 }
@@ -340,11 +338,11 @@ func (c *Config) validateServer(v *validator) {
 	if s.ShutdownTimeout < 0 || s.ReadTimeout < 0 || s.WriteTimeout < 0 || s.IdleTimeout < 0 {
 		v.addf("server timeouts must be non-negative")
 	}
-	if s.HTTPSPort > 0 && (s.ReadTimeout <= 0 || s.WriteTimeout <= 0) {
-		v.addf("server.read_timeout and server.write_timeout must be > 0 when https_port > 0")
+	if s.ReadTimeout <= 0 || s.WriteTimeout <= 0 {
+		v.addf("server.read_timeout and server.write_timeout must be > 0")
 	}
-	if s.MaxHeaderBytes < 4096 {
-		v.addf("server.max_header_bytes %d must be >= 4096", s.MaxHeaderBytes)
+	if s.MaxHeaderBytes <= 0 {
+		v.addf("server.max_header_bytes %d must be positive", s.MaxHeaderBytes)
 	}
 	c.validateTrustedProxies(v)
 	c.validateHSTS(v)
@@ -368,9 +366,6 @@ func (c *Config) validateServer(v *validator) {
 	}
 	if u.Path != "" && u.Path != "/" {
 		v.addf("server.public_url must not contain a path, got %q", u.Path)
-	}
-	if strings.HasSuffix(strings.TrimSpace(s.PublicURL), "/") {
-		v.addf("server.public_url must not end with a slash")
 	}
 	if u.Hostname() == "" {
 		v.addf("server.public_url must contain a host")
@@ -483,18 +478,18 @@ func (c *Config) validateACME(v *validator) {
 }
 
 func (c *Config) validateAccess(v *validator) {
-	a := &c.Access
-	if a.RedirectRate <= 0 {
-		v.addf("access.redirect_rate must be > 0")
+	rl := &c.RateLimit
+	if rl.RedirectRate <= 0 {
+		v.addf("rate_limit.redirect_rate must be > 0")
 	}
-	if a.RedirectBurst < 0 {
-		v.addf("access.redirect_burst must be >= 0")
+	if rl.RedirectBurst < 0 {
+		v.addf("rate_limit.redirect_burst must be >= 0")
 	}
-	if a.APIRate <= 0 {
-		v.addf("access.api_rate must be > 0")
+	if rl.APIRate <= 0 {
+		v.addf("rate_limit.api_rate must be > 0")
 	}
-	if a.APIBurst < 0 {
-		v.addf("access.api_burst must be >= 0")
+	if rl.APIBurst < 0 {
+		v.addf("rate_limit.api_burst must be >= 0")
 	}
 }
 
@@ -520,9 +515,6 @@ func (c *Config) validateBackup(v *validator) {
 	}
 	if b.CompactTxMaxBytes <= 0 {
 		v.addf("backup.compact_tx_max_bytes must be > 0")
-	}
-	if b.Dir != "" && !strings.HasSuffix(b.Dir, "/") {
-		v.addf("backup.dir %q must end with a slash", b.Dir)
 	}
 }
 
@@ -553,9 +545,6 @@ func (c *Config) validateRules(v *validator) {
 		if re.MatchString("") {
 			v.addf("%s: match must not match the empty string", ctx)
 		}
-		if !strings.HasPrefix(r.Key, "/") {
-			v.addf("%s: key must start with /", ctx)
-		}
 		if _, err := parseKeyTemplate(r.Name, r.Key, c.Abbreviations); err != nil {
 			v.addf("%s: key template: %v", ctx, err)
 		}
@@ -563,8 +552,9 @@ func (c *Config) validateRules(v *validator) {
 			if !slices.Contains(re.SubexpNames(), r.Hash) {
 				v.addf("%s: hash %q does not name a capture group", ctx, r.Hash)
 			}
-			if r.HashMinlen < 4 {
-				v.addf("%s: hash_minlen %d must be >= 4", ctx, r.HashMinlen)
+			if r.HashMinlen < hashMinLen {
+				v.addf("%s: hash_minlen %d must be >= %d",
+					ctx, r.HashMinlen, hashMinLen)
 			}
 		} else if r.HashMinlen != 0 {
 			v.addf("%s: hash_minlen set without hash", ctx)
@@ -625,10 +615,6 @@ func (c *Config) validateClients(v *validator) {
 		}
 	}
 
-	c.warnNamespaceOverlap(v)
-}
-
-func (c *Config) warnNamespaceOverlap(v *validator) {
 	for i := 0; i < len(c.Clients); i++ {
 		for j := i + 1; j < len(c.Clients); j++ {
 			for _, a := range c.Clients[i].Namespaces {
@@ -673,10 +659,6 @@ func parseTrustedProxies(list []string) ([]netip.Prefix, error) {
 	return out, nil
 }
 
-// TrustedProxyPrefixes returns the trusted proxy prefixes parsed during
-// validation.
-func (c *Config) TrustedProxyPrefixes() []netip.Prefix { return c.trustedPrefixes }
-
 func isASCII(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] >= 0x80 {
@@ -687,7 +669,7 @@ func isASCII(s string) bool {
 }
 
 var (
-	namespaceRe       = regexp.MustCompile(`^(?:/[A-Za-z0-9._~-]+)+/$`)
+	namespaceRe       = regexp.MustCompile(`^(?:/[A-Za-z0-9_-][A-Za-z0-9._~-]*)+/$`)
 	reservedPrefixes  = []string{"/.api/", "/.well-known/"}
 	reservedExactKeys = []string{"/robots.txt", "/favicon.ico"}
 )
@@ -697,14 +679,6 @@ var (
 func validNamespace(ns string) bool {
 	if !namespaceRe.MatchString(ns) {
 		return false
-	}
-	for _, seg := range strings.Split(strings.Trim(ns, "/"), "/") {
-		if seg == "." || seg == ".." {
-			return false
-		}
-		if strings.HasPrefix(seg, ".") || strings.HasPrefix(seg, "~") {
-			return false
-		}
 	}
 	for _, p := range reservedPrefixes {
 		if strings.HasPrefix(ns, p) {
@@ -763,10 +737,15 @@ func keyTemplateFuncs(abbrev map[string]string) template.FuncMap {
 	}
 }
 
+var ruleKeyInvalidRe = regexp.MustCompile(`\{\{-?\s*(define|template|block)\b`)
+
 // parseKeyTemplate parses a rule key template with the restricted FuncMap and
 // rejects {{template}}/{{block}}/{{define}} constructs.
 func parseKeyTemplate(name, text string, abbrev map[string]string) (*template.Template, error) {
-	if strings.Contains(text, "{{define") || strings.Contains(text, "{{template") || strings.Contains(text, "{{block") {
+	if !strings.HasPrefix(text, "/") {
+		return nil, errors.New("must start with /")
+	}
+	if ruleKeyInvalidRe.MatchString(text) {
 		return nil, errors.New("template/define/block actions are not allowed")
 	}
 	t, err := template.New(name).Funcs(keyTemplateFuncs(abbrev)).Parse(text)
@@ -780,7 +759,9 @@ func parseKeyTemplate(name, text string, abbrev map[string]string) (*template.Te
 // Accessors
 
 // PublicURL returns the parsed public URL.
-func (c *Config) PublicURL() *url.URL { return c.publicURL }
+func (c *Config) PublicURL() *url.URL {
+	return c.publicURL
+}
 
 // PublicHost returns the hostname (no port) of public_url.
 func (c *Config) PublicHost() string {
@@ -802,9 +783,15 @@ func (c *Config) AllowedHosts() []string {
 	return hosts
 }
 
+// GetTrustedProxies returns the trusted proxy prefixes parsed during
+// validation.
+func (c *Config) GetTrustedProxies() []netip.Prefix {
+	return c.trustedPrefixes
+}
+
 // LogsDir returns the directory holding the daily access log files.
 func (c *Config) LogsDir() string {
-	return filepath.Join(c.DataDir, "logs") + "/"
+	return filepath.Join(c.DataDir, "logs")
 }
 
 // EnsureDirs creates the filesystem directories the program needs and verifies

@@ -271,8 +271,8 @@ func NewServer(
 		logger:          logger,
 		certs:           certs,
 		status:          status,
-		redirectLimiter: NewRateLimiter(cfg.Access.RedirectRate, cfg.Access.RedirectBurst, 10000),
-		apiLimiter:      NewRateLimiter(cfg.Access.APIRate, cfg.Access.APIBurst, 10000),
+		redirectLimiter: NewRateLimiter(cfg.RateLimit.RedirectRate, cfg.RateLimit.RedirectBurst, 10000),
+		apiLimiter:      NewRateLimiter(cfg.RateLimit.APIRate, cfg.RateLimit.APIBurst, 10000),
 		allowedHosts:    make(map[string]bool),
 		shutdownTimeout: time.Duration(cfg.Server.ShutdownTimeout) * time.Second,
 		readTimeout:     time.Duration(cfg.Server.ReadTimeout) * time.Second,
@@ -282,7 +282,7 @@ func NewServer(
 	for _, h := range cfg.AllowedHosts() {
 		srv.allowedHosts[h] = true
 	}
-	srv.trustedProxies = cfg.TrustedProxyPrefixes()
+	srv.trustedProxies = cfg.GetTrustedProxies()
 	if hsts := cfg.Server.HSTS; hsts.Enabled {
 		srv.hstsValue = hsts.HeaderValue()
 	}
