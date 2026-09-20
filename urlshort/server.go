@@ -225,15 +225,44 @@ type Server struct {
 
 // NewServer builds the server and its handlers. certs may be nil when
 // https_port is 0.
-func NewServer(cfg *Config, store Store, rules *Ruleset, auth *Authenticator, logs *AccessLogger, certs CertManager, status *StatusState, base *slog.Logger) *Server {
-	if status == nil {
-		status = NewStatusState()
-	}
+func NewServer(
+	cfg *Config,
+	store Store,
+	certs CertManager,
+	status *StatusState,
+	base *slog.Logger,
+) (srv *Server, err error) {
 	if base == nil {
 		base = slog.Default()
 	}
+	if status == nil {
+		status = NewStatusState()
+	}
+
+	logs, err := NewAccessLogger(cfg.LogsDir(), cfg.AccessLog.RetentionDays,
+		time.Duration(cfg.AccessLog.FlushInterval)*time.Second, nil, base)
+	if err != nil {
+		return nil, err
+	}
+	// Roll back the access logger if a later step fails. Registered only after
+	// logs is created so the receiver is never nil.
+	defer func() {
+		if err != nil {
+			logs.Close()
+		}
+	}()
+
+	rules, err := NewRuleset(cfg.Rules, cfg.Abbreviations)
+	if err != nil {
+		return nil, err
+	}
+	auth, err := NewAuthenticator(cfg.Clients)
+	if err != nil {
+		return nil, err
+	}
+
 	logger := base.With(slog.String("comp", "server"))
-	s := &Server{
+	srv = &Server{
 		cfg:             cfg,
 		store:           store,
 		rules:           rules,
@@ -251,15 +280,23 @@ func NewServer(cfg *Config, store Store, rules *Ruleset, auth *Authenticator, lo
 		idleTimeout:     time.Duration(cfg.Server.IdleTimeout) * time.Second,
 	}
 	for _, h := range cfg.AllowedHosts() {
-		s.allowedHosts[h] = true
+		srv.allowedHosts[h] = true
 	}
-	s.trustedProxies = cfg.TrustedProxyPrefixes()
+	srv.trustedProxies = cfg.TrustedProxyPrefixes()
 	if hsts := cfg.Server.HSTS; hsts.Enabled {
-		s.hstsValue = hsts.HeaderValue()
+		srv.hstsValue = hsts.HeaderValue()
 	}
-	s.mainHandler = s.buildMainHandler()
-	s.httpHandler = s.buildHTTPHandler()
-	return s
+	srv.mainHandler = srv.buildMainHandler()
+	srv.httpHandler = srv.buildHTTPHandler()
+	return srv, nil
+}
+
+// Close releases the resources owned by the server. It is safe to call more
+// than once and after Serve has returned. The caller owns the Store.
+func (s *Server) Close() {
+	if s.logs != nil {
+		s.logs.Close()
+	}
 }
 
 // SetMaintenance attaches the backup maintenance state for the status endpoint.

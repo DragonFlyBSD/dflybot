@@ -17,7 +17,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 )
 
 func main() {
@@ -48,36 +47,31 @@ func run(configPath string) error {
 		logger.Warn("config warning", "message", w)
 	}
 
-	logs, err := NewAccessLogger(cfg.LogsDir(), cfg.AccessLog.RetentionDays,
-		time.Duration(cfg.AccessLog.FlushInterval)*time.Second, nil, logger)
-	if err != nil {
-		return err
-	}
-	defer logs.Close()
-
-	store, err := OpenBoltStore(filepath.Join(cfg.DataDir, "links.db"),
-		cfg.Backup.CompactTxMaxBytes)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-
-	rules, err := NewRuleset(cfg.Rules, cfg.Abbreviations)
-	if err != nil {
-		return err
-	}
-	auth, err := NewAuthenticator(cfg.Clients)
-	if err != nil {
-		return err
-	}
-
 	status := NewStatusState()
 	certs, err := buildCertManager(cfg, status, logger)
 	if err != nil {
 		return err
 	}
 
-	srv := NewServer(cfg, store, rules, auth, logs, certs, status, logger)
+	store, err := OpenBoltStore(filepath.Join(cfg.DataDir, "links.db"),
+		cfg.Backup.CompactTxMaxBytes)
+	if err != nil {
+		return err
+	}
+
+	srv, err := NewServer(cfg, store, certs, status, logger)
+	if err != nil {
+		store.Close()
+		return err
+	}
+
+	// Shutdown order (C16): Serve drains the listeners, then the store is
+	// closed and finally the access log is flushed and closed.
+	defer func() {
+		store.Close()
+		srv.Close()
+	}()
+
 	maint := NewMaintenance(cfg, store, logger)
 	srv.SetMaintenance(maint)
 

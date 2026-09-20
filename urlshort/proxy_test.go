@@ -122,7 +122,7 @@ func TestAccessLogUsesClientIP(t *testing.T) {
 	req.Header.Set("X-Forwarded-For", "198.51.100.7")
 	rec := httptest.NewRecorder()
 	env.srv.mainHandler.ServeHTTP(rec, req)
-	env.logs.Close()
+	env.srv.Close() // flush access log
 
 	files, err := filepath.Glob(filepath.Join(env.cfg.LogsDir(), "access-*.jsonl"))
 	if err != nil || len(files) == 0 {

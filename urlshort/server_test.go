@@ -9,6 +9,8 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -147,4 +149,35 @@ func TestHTTPToHTTPSRedirect(t *testing.T) {
 	if loc := rec.Header().Get("Location"); loc != "https://www.example.com/g/t" {
 		t.Fatalf("extra host location = %q", loc)
 	}
+}
+
+// TestNewServerAccessLogFailure verifies that a failure while creating the
+// access logger returns an error without panicking (the rollback defer must not
+// run with a nil receiver).
+func TestNewServerAccessLogFailure(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.DataDir = blocker + "/" // LogsDir() cannot be created
+
+	store, err := OpenBoltStore(filepath.Join(dir, "links.db"), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if _, err := NewServer(cfg, store, nil, nil, nil); err == nil {
+		t.Fatal("expected an error when the access log directory cannot be created")
+	}
+}
+
+// TestServerCloseIdempotent checks that Close is safe to call repeatedly.
+func TestServerCloseIdempotent(t *testing.T) {
+	env := newTestEnv(t)
+	env.srv.Close()
+	env.srv.Close()
 }

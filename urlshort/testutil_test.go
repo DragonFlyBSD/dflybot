@@ -16,7 +16,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 const (
@@ -29,7 +28,6 @@ type testEnv struct {
 	t     *testing.T
 	cfg   *Config
 	store *BoltStore
-	logs  *AccessLogger
 	srv   *Server
 }
 
@@ -99,27 +97,18 @@ func newTestEnvWith(t *testing.T, mutate func(*Config)) *testEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rules, err := NewRuleset(cfg.Rules, cfg.Abbreviations)
-	if err != nil {
-		t.Fatal(err)
-	}
-	auth, err := NewAuthenticator(cfg.Clients)
-	if err != nil {
-		t.Fatal(err)
-	}
-	logs, err := NewAccessLogger(cfg.LogsDir(), cfg.AccessLog.RetentionDays, time.Hour, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	status := NewStatusState()
 	cert := makeTestCert(t, "example.com")
 	certs := &recordingCertManager{inner: &manualCertManager{cert: &cert}, status: status, logger: slog.Default()}
-	srv := NewServer(cfg, store, rules, auth, logs, certs, status, nil)
+	srv, err := NewServer(cfg, store, certs, status, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv.SetMaintenance(NewMaintenance(cfg, store, nil))
 
-	env := &testEnv{t: t, cfg: cfg, store: store, logs: logs, srv: srv}
+	env := &testEnv{t: t, cfg: cfg, store: store, srv: srv}
 	t.Cleanup(func() {
-		logs.Close()
+		srv.Close()
 		store.Close()
 	})
 	return env
