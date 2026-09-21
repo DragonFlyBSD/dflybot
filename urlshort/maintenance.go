@@ -108,7 +108,12 @@ func (m *Maintenance) loop(ctx context.Context) {
 		}
 	}
 	for {
-		next := m.nextRun(m.now())
+		now := m.now().UTC()
+		next := time.Date(now.Year(), now.Month(), now.Day(),
+			m.cfg.Backup.HourUTC, 0, 0, 0, time.UTC)
+		if !next.After(now) {
+			next = next.Add(24 * time.Hour)
+		}
 		timer := time.NewTimer(time.Until(next))
 		select {
 		case <-ctx.Done():
@@ -120,16 +125,6 @@ func (m *Maintenance) loop(ctx context.Context) {
 			}
 		}
 	}
-}
-
-// nextRun returns the next occurrence of backup.hour_utc after now.
-func (m *Maintenance) nextRun(now time.Time) time.Time {
-	now = now.UTC()
-	next := time.Date(now.Year(), now.Month(), now.Day(), m.cfg.Backup.HourUTC, 0, 0, 0, time.UTC)
-	if !next.After(now) {
-		next = next.Add(24 * time.Hour)
-	}
-	return next
 }
 
 // RunOnce performs one backup. trigger is "startup" or "scheduled".
@@ -144,7 +139,7 @@ func (m *Maintenance) RunOnce(trigger string) error {
 	m.cleanup(m.now())
 	m.record(err)
 	if err != nil {
-		m.logger.Warn("compacted backup failed", "trigger", trigger, "error", err)
+		m.logger.Warn("backup failed", "trigger", trigger, "error", err)
 	}
 	return err
 }
@@ -210,12 +205,13 @@ func (m *Maintenance) backup(trigger string) error {
 func (m *Maintenance) record(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.status.BackupDir = m.cfg.Backup.Dir
+
 	if err != nil {
 		m.status.LastBackupOK = false
 		m.status.LastBackupError = err.Error()
 		return
 	}
+
 	now := m.now().UTC()
 	m.status.LastBackupOK = true
 	m.status.LastBackupError = ""
@@ -303,7 +299,6 @@ func (m *Maintenance) Status() MaintenanceStatus {
 	if files, err := m.listBackups(); err == nil {
 		st.BackupFiles = len(files)
 	}
-	st.BackupDir = m.cfg.Backup.Dir
 	return st
 }
 

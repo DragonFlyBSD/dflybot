@@ -49,21 +49,7 @@ func OpenBoltStore(path string, compactTxMaxBytes int64) (*BoltStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open bbolt %q: %w", path, err)
 	}
-	s := &BoltStore{
-		db:                db,
-		path:              path,
-		compactTxMaxBytes: compactTxMaxBytes,
-		now:               func() time.Time { return time.Now().UTC() },
-	}
-	if err := s.init(); err != nil {
-		db.Close()
-		return nil, err
-	}
-	return s, nil
-}
-
-func (s *BoltStore) init() error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err = db.Update(func(tx *bolt.Tx) error {
 		meta, err := tx.CreateBucketIfNotExists([]byte(bucketMeta))
 		if err != nil {
 			return err
@@ -90,6 +76,16 @@ func (s *BoltStore) init() error {
 		// Older versions: run migrations here as they are added.
 		return nil
 	})
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &BoltStore{
+		db:                db,
+		path:              path,
+		compactTxMaxBytes: compactTxMaxBytes,
+		now:               func() time.Time { return time.Now().UTC() },
+	}, nil
 }
 
 func (s *BoltStore) Resolve(target string) (string, error) {
@@ -132,7 +128,8 @@ func (s *BoltStore) Create(target, rule, owner, explicitKey string, gen KeyFunc)
 
 		if k := targets.Get([]byte(target)); k != nil {
 			if explicitKey != "" && explicitKey != string(k) {
-				return fmt.Errorf("%w: target already mapped to key %q", ErrConflict, string(k))
+				return fmt.Errorf("%w: target already mapped to key %q",
+					ErrConflict, string(k))
 			}
 			raw := links.Get(k)
 			if raw == nil {
@@ -286,8 +283,8 @@ func (s *BoltStore) List(prefix string, limit int, cursor string) ([]*Link, stri
 			}
 			l.Key = string(k)
 			links = append(links, &l)
-			next = string(k)
 			if len(links) >= limit {
+				next = string(k)
 				break
 			}
 		}
@@ -295,9 +292,6 @@ func (s *BoltStore) List(prefix string, limit int, cursor string) ([]*Link, stri
 	})
 	if err != nil {
 		return nil, "", err
-	}
-	if len(links) < limit {
-		next = ""
 	}
 	return links, next, nil
 }

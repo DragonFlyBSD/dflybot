@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Aaron LI
 //
-// REST API handlers under /.api/v1.
+// REST API handlers.
 //
 // All endpoints except /health require a bearer token. JSON in and out, body
 // limit 64 KiB, strict decoding.
@@ -28,10 +28,8 @@ const (
 	// keys, and redirects must never use it as a prefix.
 	apiRoot = "/.api/"
 
-	// apiBase is the versioned API base; apiPrefix is apiBase with the
-	// trailing slash used for prefix matching.
-	apiBase   = apiRoot + "v1"
-	apiPrefix = apiBase + "/"
+	// apiBase is the versioned API base.
+	apiBase = apiRoot + "v1"
 
 	apiPathHealth = apiBase + "/health"
 	apiPathStatus = apiBase + "/status"
@@ -42,7 +40,7 @@ const (
 // isAPIPath reports whether p targets the API tree, including apiBase itself
 // (the API index).
 func isAPIPath(p string) bool {
-	return p == apiBase || strings.HasPrefix(p, apiPrefix)
+	return p == apiBase || strings.HasPrefix(p, apiBase+"/")
 }
 
 // apiEndpoint is one operation listed by the API index.
@@ -139,7 +137,7 @@ func requireMethod(w http.ResponseWriter, r *http.Request, methods ...string) bo
 
 func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
-	case apiBase, apiPrefix:
+	case apiBase, apiBase + "/":
 		s.handleAPIIndex(w, r)
 	case apiPathHealth:
 		if !requireMethod(w, r, http.MethodGet) {

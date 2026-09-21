@@ -15,7 +15,7 @@ import (
 
 func TestAPIIndex(t *testing.T) {
 	e := newTestEnv(t)
-	for _, path := range []string{apiBase, apiPrefix} {
+	for _, path := range []string{apiBase, apiBase + "/"} {
 		rec := e.request(http.MethodGet, path, "", nil, nil)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("GET %s = %d", path, rec.Code)
