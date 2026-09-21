@@ -15,18 +15,10 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"net"
-	"net/url"
 	"regexp"
 	"strings"
 	"text/template"
 )
-
-// MaxTargetLen is the maximum accepted canonical target length.
-const MaxTargetLen = 8192
-
-// MaxKeyLen is the maximum accepted generated key length.
-const MaxKeyLen = 256
 
 // ErrForbidden marks an authorization failure (namespace violation). It is
 // defined here so the rules engine, store generator, and API can share it.
@@ -57,7 +49,8 @@ func NewRuleset(cfgs []RuleConfig, abbrev map[string]string) (*Ruleset, error) {
 			return nil, fmt.Errorf("rule %q: compile match: %w", cfg.Name, err)
 		}
 		if re.MatchString("") {
-			return nil, fmt.Errorf("rule %q: match must not match the empty string", cfg.Name)
+			return nil, fmt.Errorf("rule %q: match must not match the empty string",
+				cfg.Name)
 		}
 		tmpl, err := parseKeyTemplate(cfg.Name, cfg.Key, abbrev)
 		if err != nil {
@@ -102,7 +95,11 @@ func (r *Rule) Render(vars map[string]string) (string, error) {
 	if err := r.tmpl.Execute(&b, vars); err != nil {
 		return "", fmt.Errorf("rule %q: render key: %w", r.Name, err)
 	}
-	return b.String(), nil
+	key := b.String()
+	if err := ValidateKey(key); err != nil {
+		return "", fmt.Errorf("rule %q: %w", r.Name, err)
+	}
+	return key, nil
 }
 
 // GenerateKey renders a key for the matched target and, for hash rules,
@@ -113,9 +110,6 @@ func (r *Rule) GenerateKey(vars map[string]string, isFree func(string) (bool, er
 		key, err := r.Render(vars)
 		if err != nil {
 			return "", err
-		}
-		if err := ValidateKey(key); err != nil {
-			return "", fmt.Errorf("rule %q: %w", r.Name, err)
 		}
 		free, err := isFree(key)
 		if err != nil {
@@ -132,26 +126,19 @@ func (r *Rule) GenerateKey(vars map[string]string, isFree func(string) (bool, er
 	if !ok || hashVal == "" {
 		return "", fmt.Errorf("rule %q: hash group %q is empty", r.Name, r.hash)
 	}
-	minlen := r.hashMinlen
-	if minlen < 4 {
-		minlen = 4
+	v := make(map[string]string, len(vars))
+	for k, val := range vars {
+		v[k] = val
 	}
+	minlen := r.hashMinlen
 	if minlen > len(hashVal) {
-		return "", fmt.Errorf("rule %q: hash_minlen %d exceeds hash value length %d",
-			r.Name, minlen, len(hashVal))
+		minlen = len(hashVal)
 	}
 	for l := minlen; l <= len(hashVal); l++ {
-		v := make(map[string]string, len(vars))
-		for k, val := range vars {
-			v[k] = val
-		}
 		v[r.hash] = hashVal[:l]
 		key, err := r.Render(v)
 		if err != nil {
 			return "", err
-		}
-		if err := ValidateKey(key); err != nil {
-			return "", fmt.Errorf("rule %q: %w", r.Name, err)
 		}
 		free, err := isFree(key)
 		if err != nil {
@@ -165,63 +152,30 @@ func (r *Rule) GenerateKey(vars map[string]string, isFree func(string) (bool, er
 		ErrConflict, r.Name, hashVal, len(hashVal))
 }
 
-// CanonicalizeTarget parses and canonicalizes a target URL. It lowercases the
-// scheme and host, drops default ports, and rejects userinfo. Path, query, and
-// fragment are preserved exactly.
-func CanonicalizeTarget(raw string) (string, error) {
-	if raw == "" {
-		return "", errors.New("empty target")
-	}
-	if len(raw) > MaxTargetLen {
-		return "", fmt.Errorf("target longer than %d bytes", MaxTargetLen)
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "", fmt.Errorf("invalid URL: %w", err)
-	}
-	scheme := strings.ToLower(u.Scheme)
-	if scheme != "http" && scheme != "https" {
-		return "", fmt.Errorf("unsupported scheme %q (only http and https)", u.Scheme)
-	}
-	if u.User != nil {
-		return "", errors.New("URL userinfo is not allowed")
-	}
-	host := strings.ToLower(u.Hostname())
-	if host == "" {
-		return "", errors.New("URL has no host")
-	}
-	port := u.Port()
-	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
-		port = ""
-	}
-	switch {
-	case port != "":
-		u.Host = net.JoinHostPort(host, port)
-	case strings.Contains(host, ":"):
-		u.Host = "[" + host + "]"
-	default:
-		u.Host = host
-	}
-	u.Scheme = scheme
-	return u.String(), nil
-}
-
 // ValidateKey checks a rule-generated or explicit key against section 7.5.
 func ValidateKey(key string) error {
+	const maxKeyLen = 256
+
 	if key == "" {
 		return errors.New("key is empty")
 	}
 	if key[0] != '/' {
 		return errors.New("key must start with /")
 	}
-	if len(key) > MaxKeyLen {
-		return fmt.Errorf("key longer than %d bytes", MaxKeyLen)
+	if len(key) > maxKeyLen {
+		return fmt.Errorf("key longer than %d bytes", maxKeyLen)
 	}
 	for i := 0; i < len(key); i++ {
 		c := key[i]
 		switch {
-		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
-		case c == '/', c == '.', c == '_', c == '~', c == '-':
+		case c >= 'A' && c <= 'Z':
+		case c >= 'a' && c <= 'z':
+		case c >= '0' && c <= '9':
+		case c == '/':
+		case c == '.':
+		case c == '_':
+		case c == '~':
+		case c == '-':
 		default:
 			return fmt.Errorf("key contains invalid character %q", c)
 		}

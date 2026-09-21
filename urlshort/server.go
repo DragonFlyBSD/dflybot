@@ -223,8 +223,7 @@ type Server struct {
 	idleTimeout     time.Duration
 }
 
-// NewServer builds the server and its handlers. certs may be nil when
-// https_port is 0.
+// NewServer builds the server and its handlers.
 func NewServer(
 	cfg *Config,
 	store Store,
@@ -237,6 +236,10 @@ func NewServer(
 	}
 	if status == nil {
 		status = NewStatusState()
+	}
+
+	if cfg.Server.HTTPSPort > 0 && certs == nil {
+		return nil, errors.New("https_port is set but no certificate manager is configured")
 	}
 
 	logs, err := NewAccessLogger(cfg.LogsDir(), cfg.AccessLog.RetentionDays,
@@ -411,11 +414,24 @@ func accessInfoFrom(r *http.Request) *accessInfo {
 	return &accessInfo{}
 }
 
+// clientIPFrom returns the client IP computed by requestIDMiddleware.
+func clientIPFrom(r *http.Request) netip.Addr {
+	if ip, ok := r.Context().Value(clientIPKey).(netip.Addr); ok {
+		return ip
+	}
+	return netip.Addr{}
+}
+
 func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get("X-Request-ID")
-		if id == "" || len(id) > 64 {
-			id = newRequestID()
+		if id == "" {
+			var b [16]byte
+			if _, err := rand.Read(b[:]); err == nil {
+				id = hex.EncodeToString(b[:])
+			} else {
+				id = strconv.FormatInt(time.Now().UnixNano(), 36)
+			}
 		}
 		w.Header().Set("X-Request-ID", id)
 		ctx := context.WithValue(r.Context(), requestIDKey, id)
@@ -423,14 +439,6 @@ func (s *Server) requestIDMiddleware(next http.Handler) http.Handler {
 		ctx = context.WithValue(ctx, clientIPKey, s.clientIP(r))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
-}
-
-func newRequestID() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return strconv.FormatInt(time.Now().UnixNano(), 36)
-	}
-	return hex.EncodeToString(b[:])
 }
 
 func (s *Server) hostCheckMiddleware(next http.Handler) http.Handler {
@@ -478,10 +486,7 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		key := rateKey(clientIPFrom(r))
-		if key == "" {
-			key = r.RemoteAddr
-		}
-		if !s.redirectLimiter.Allow(key) {
+		if key == "" || !s.redirectLimiter.Allow(key) {
 			w.Header().Set("Retry-After", "1")
 			writePlainError(w, http.StatusTooManyRequests, "rate limited")
 			return
@@ -496,9 +501,11 @@ func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(rec, r)
+
 		status := rec.status
 		if status == 0 {
 			status = http.StatusOK
@@ -509,7 +516,7 @@ func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
 			typ = classifyAccessType(r.URL.Path)
 		}
 		id, _ := r.Context().Value(requestIDKey).(string)
-		remote := remoteHost(r.RemoteAddr)
+		remote := stripPort(r.RemoteAddr)
 		if ip := clientIPFrom(r); ip.IsValid() {
 			remote = ip.String()
 		}
@@ -520,17 +527,18 @@ func (s *Server) accessLogMiddleware(next http.Handler) http.Handler {
 			Method:     r.Method,
 			Host:       r.Host,
 			Path:       r.URL.Path,
+			Key:        ai.Key,
 			Status:     status,
+			Target:     ai.Target,
+			Rule:       ai.Rule,
+			Client:     ai.Client,
+			Action:     ai.Action,
 			RequestID:  id,
 			UserAgent:  r.UserAgent(),
 			Referer:    r.Referer(),
 			DurationMS: float64(time.Since(start).Microseconds()) / 1000.0,
 			Bytes:      rec.bytes,
 		}
-		if ai.Client != "" {
-			entry.Client = ai.Client
-		}
-		entry.Key, entry.Target, entry.Rule, entry.Action = ai.Key, ai.Target, ai.Rule, ai.Action
 		s.logs.Log(entry)
 	})
 }
@@ -605,21 +613,16 @@ func (s *Server) routeMain(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// redirectToHTTPS redirects a validated host and path to HTTPS.
+// redirectToHTTPS redirects the request to HTTPS.
 func (s *Server) redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
 	writeSecurityHeaders(w)
-	w.Header().Set("Cache-Control", "no-store")
-	host := r.Host
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
+	host := stripPort(r.Host)
 	if s.cfg.Server.HTTPSPort != 443 {
 		host = net.JoinHostPort(host, strconv.Itoa(s.cfg.Server.HTTPSPort))
 	} else if strings.Contains(host, ":") {
 		host = "[" + host + "]"
 	}
-	loc := "https://" + host + r.RequestURI
-	w.Header().Set("Location", loc)
+	w.Header().Set("Location", "https://"+host+r.RequestURI)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusPermanentRedirect)
 }
@@ -627,21 +630,12 @@ func (s *Server) redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 // Helpers
 
-// remoteHost returns the host part of a RemoteAddr (without the port).
-func remoteHost(remoteAddr string) string {
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		return remoteAddr
+// stripPort removes the port of an address (e.g., RemoteAddr, Host header).
+func stripPort(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
 	}
-	return host
-}
-
-// clientIPFrom returns the client IP computed by requestIDMiddleware.
-func clientIPFrom(r *http.Request) netip.Addr {
-	if ip, ok := r.Context().Value(clientIPKey).(netip.Addr); ok {
-		return ip
-	}
-	return netip.Addr{}
+	return addr
 }
 
 // isTrustedProxy reports whether ip is one of the configured trusted proxies.
@@ -659,7 +653,7 @@ func (s *Server) isTrustedProxy(ip netip.Addr) bool {
 // X-Forwarded-For is walked right-to-left, skipping trusted proxies, so a
 // client-injected value cannot spoof the result; X-Real-IP is the fallback.
 func (s *Server) clientIP(r *http.Request) netip.Addr {
-	direct, err := netip.ParseAddr(remoteHost(r.RemoteAddr))
+	direct, err := netip.ParseAddr(stripPort(r.RemoteAddr))
 	if err != nil {
 		return netip.Addr{}
 	}
@@ -768,7 +762,6 @@ func (s *Server) Serve(ctx context.Context) error {
 			}
 		}()
 	}
-
 	closeAll := func() {
 		for _, srv := range servers {
 			srv.Close()
@@ -789,10 +782,6 @@ func (s *Server) Serve(ctx context.Context) error {
 			add(ln, s.newServer(h), ln.Addr().String())
 		}
 		if s.cfg.Server.HTTPSPort > 0 {
-			if s.certs == nil {
-				closeAll()
-				return errors.New("https_port is set but no certificate manager is configured")
-			}
 			ln, err := listenTCP(ctx, addr, s.cfg.Server.HTTPSPort)
 			if err != nil {
 				closeAll()

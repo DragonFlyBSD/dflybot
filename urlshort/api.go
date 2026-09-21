@@ -12,8 +12,11 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"runtime"
 	"strconv"
 	"strings"
@@ -423,7 +426,7 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request, c *Client) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	target, err := CanonicalizeTarget(req.Target)
+	target, err := canonicalizeTarget(req.Target)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "bad_request",
 			"invalid target: "+err.Error())
@@ -468,13 +471,10 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request, c *Client) {
 	)
 	if matched {
 		ruleName = rule.Name
+		// Render a key to validate the namespace.
 		full, err := rule.Render(vars)
 		if err != nil {
 			s.writeInternalError(w, err, "rule render failed")
-			return
-		}
-		if err := ValidateKey(full); err != nil {
-			s.writeInternalError(w, err, "rule generated an invalid key")
 			return
 		}
 		if !c.CanAccess(full) {
@@ -529,6 +529,49 @@ func (s *Server) finishCreate(w http.ResponseWriter, r *http.Request, link *Link
 	writeJSON(w, status, createResponse{linkView: s.linkView(link), Created: created})
 }
 
+// canonicalizeTarget parses and canonicalizes a target URL. It lowercases the
+// scheme and host, drops default ports, and rejects userinfo. Path, query, and
+// fragment are preserved exactly.
+func canonicalizeTarget(raw string) (string, error) {
+	const maxTargetLen = 8192
+
+	if raw == "" {
+		return "", errors.New("empty target")
+	}
+	if len(raw) > maxTargetLen {
+		return "", fmt.Errorf("target longer than %d bytes", maxTargetLen)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid URL: %w", err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", fmt.Errorf("unsupported scheme %q (only http and https)", u.Scheme)
+	}
+	if u.User != nil {
+		return "", errors.New("URL userinfo is not allowed")
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return "", errors.New("URL has no host")
+	}
+	port := u.Port()
+	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		port = ""
+	}
+	switch {
+	case port != "":
+		u.Host = net.JoinHostPort(host, port)
+	case strings.Contains(host, ":"):
+		u.Host = "[" + host + "]"
+	default:
+		u.Host = host
+	}
+	u.Scheme = scheme
+	return u.String(), nil
+}
+
 func (s *Server) updateLink(w http.ResponseWriter, r *http.Request, c *Client) {
 	key := r.URL.Query().Get("key")
 	if key == "" {
@@ -547,7 +590,7 @@ func (s *Server) updateLink(w http.ResponseWriter, r *http.Request, c *Client) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	target, err := CanonicalizeTarget(req.Target)
+	target, err := canonicalizeTarget(req.Target)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "bad_request",
 			"invalid target: "+err.Error())

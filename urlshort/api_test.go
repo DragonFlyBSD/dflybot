@@ -324,3 +324,41 @@ func TestAPIInvalidJSON(t *testing.T) {
 		t.Fatalf("unknown field = %d, want 400", rec.Code)
 	}
 }
+
+func TestAPICanonicalizeTarget(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"HTTPS://GitHub.COM/a/b", "https://github.com/a/b"},
+		{"http://Example.COM:80/a", "http://example.com/a"},
+		{"https://example.com:443/a", "https://example.com/a"},
+		{"https://example.com/a?b=1&c=2#frag", "https://example.com/a?b=1&c=2#frag"},
+		{"https://example.com/A/B", "https://example.com/A/B"},
+		{"http://[::1]:80/x", "http://[::1]/x"},
+		{"https://example.com:8443/x", "https://example.com:8443/x"},
+	}
+	for _, tc := range cases {
+		got, err := canonicalizeTarget(tc.in)
+		if err != nil {
+			t.Errorf("%q: unexpected error %v", tc.in, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%q: got %q, want %q", tc.in, got, tc.want)
+		}
+	}
+
+	bad := []string{
+		"",
+		"ftp://example.com/x",
+		"https://u:p@example.com/x",
+		"https:///x",
+		"://bad",
+	}
+	for _, in := range bad {
+		if _, err := canonicalizeTarget(in); err == nil {
+			t.Errorf("%q: expected error", in)
+		}
+	}
+}
