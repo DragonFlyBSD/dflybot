@@ -9,6 +9,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -40,7 +41,7 @@ func newTestMaintenance(t *testing.T, store Store, now func() time.Time) *Mainte
 	cfg.Backup.HourUTC = 3
 	cfg.Backup.RunOnStart = false
 	cfg.Backup.RetentionDays = 30
-	cfg.Backup.RetentionCount = 3
+	cfg.Backup.StartupRetentionCount = 3
 	cfg.Backup.CompactTxMaxBytes = 1 << 20
 	m := NewMaintenance(cfg, store, nil)
 	m.now = now
@@ -103,13 +104,15 @@ func TestMaintenanceStartupNames(t *testing.T) {
 	}
 }
 
-func TestMaintenanceRetentionCount(t *testing.T) {
+func TestMaintenanceStartupRetentionCount(t *testing.T) {
 	store := newTestStore(t)
 	if _, _, err := store.Create("https://x/1", "", "", "/g/1", nil); err != nil {
 		t.Fatal(err)
 	}
 	clock := newMaintClock(time.Date(2026, 9, 11, 3, 0, 0, 0, time.UTC))
 	m := newTestMaintenance(t, store, clock.now)
+	m.cfg.Backup.StartupRetentionCount = 2
+
 	// Create four same-day startup backups with distinct second timestamps.
 	for i := 0; i < 4; i++ {
 		clock.advance(time.Second)
@@ -118,13 +121,44 @@ func TestMaintenanceRetentionCount(t *testing.T) {
 		}
 	}
 	m.cleanup(clock.now())
-	entries, err := os.ReadDir(m.cfg.Backup.Dir)
+	if n := countBackups(t, m.cfg.Backup.Dir, true); n != 2 {
+		t.Fatalf("startup backups = %d, want 2", n)
+	}
+
+	// Daily backups are governed only by retention_days, never by the cap.
+	for _, day := range []string{"2026-09-08", "2026-09-09", "2026-09-10", "2026-09-11"} {
+		if err := os.WriteFile(filepath.Join(m.cfg.Backup.Dir, "links-"+day+".db"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.cleanup(clock.now())
+	if n := countBackups(t, m.cfg.Backup.Dir, false); n != 4 {
+		t.Fatalf("daily backups = %d, want 4", n)
+	}
+	if n := countBackups(t, m.cfg.Backup.Dir, true); n != 2 {
+		t.Fatalf("startup backups after cleanup = %d, want 2", n)
+	}
+}
+
+// countBackups counts `.db` backups of one kind by filename.
+func countBackups(t *testing.T, dir string, startup bool) int {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 3 {
-		t.Fatalf("retention_count kept %d files, want 3", len(entries))
+	n := 0
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "links-") || !strings.HasSuffix(name, ".db") {
+			continue
+		}
+		rest := strings.TrimSuffix(strings.TrimPrefix(name, "links-"), ".db")
+		if (len(rest) > 10 && rest[10] == 'T') == startup {
+			n++
+		}
 	}
+	return n
 }
 
 func TestMaintenanceRetentionDays(t *testing.T) {

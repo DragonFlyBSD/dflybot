@@ -133,13 +133,13 @@ type AccessLogConfig struct {
 
 // BackupConfig holds the compacted backup configuration.
 type BackupConfig struct {
-	Enabled           bool   `toml:"enabled"`
-	Dir               string `toml:"dir"`
-	HourUTC           int    `toml:"hour_utc"`
-	RunOnStart        bool   `toml:"run_on_start"`
-	RetentionDays     int    `toml:"retention_days"`
-	RetentionCount    int    `toml:"retention_count"`
-	CompactTxMaxBytes int64  `toml:"compact_tx_max_bytes"`
+	Enabled               bool   `toml:"enabled"`
+	Dir                   string `toml:"dir"`
+	HourUTC               int    `toml:"hour_utc"`
+	RunOnStart            bool   `toml:"run_on_start"`
+	RetentionDays         int    `toml:"retention_days"`
+	StartupRetentionCount int    `toml:"startup_retention_count"`
+	CompactTxMaxBytes     int64  `toml:"compact_tx_max_bytes"`
 }
 
 // RuleConfig is one ordered mapping rule.
@@ -208,12 +208,12 @@ func DefaultConfig() *Config {
 			FlushInterval: 5,
 		},
 		Backup: BackupConfig{
-			Enabled:           true,
-			HourUTC:           3,
-			RunOnStart:        true,
-			RetentionDays:     30,
-			RetentionCount:    3,
-			CompactTxMaxBytes: 1048576,
+			Enabled:               true,
+			HourUTC:               3,
+			RunOnStart:            true,
+			RetentionDays:         30,
+			StartupRetentionCount: 3,
+			CompactTxMaxBytes:     1048576,
 		},
 	}
 }
@@ -510,8 +510,8 @@ func (c *Config) validateBackup(v *validator) {
 	if b.RetentionDays < 0 {
 		v.addf("backup.retention_days must be >= 0")
 	}
-	if b.RetentionCount < 0 {
-		v.addf("backup.retention_count must be >= 0")
+	if b.StartupRetentionCount < 0 {
+		v.addf("backup.startup_retention_count must be >= 0")
 	}
 	if b.CompactTxMaxBytes <= 0 {
 		v.addf("backup.compact_tx_max_bytes must be > 0")

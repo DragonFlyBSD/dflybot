@@ -332,9 +332,10 @@ hour_utc = 3
 run_on_start = true
 # Delete backups older than this many days (0 disables deletion).
 retention_days = 30
-# Optional cap on the number of backup files (0 = unlimited); bounds a
-# restart loop that produces many same-day startup backups.
-retention_count = 3
+# Cap the number of startup backups kept (0 = unlimited). Daily backups are
+# governed only by retention_days; this bounds a restart loop that produces
+# many startup backups.
+startup_retention_count = 3
 # Compaction transaction size limit in bytes; bounds memory during compaction.
 compact_tx_max_bytes = 1048576
 
@@ -407,7 +408,7 @@ Startup must fail (exit non-zero, clear message) if any of these fail.
 | `trusted_proxies` | each entry is an IP or CIDR; a prefix length of 0 warns (trusts every peer) |
 | `hsts` | `enabled` requires `https_port > 0` and `max_age > 0`; `preload` requires `include_subdomains` and `max_age >= 31536000` |
 | `data_dir` | present, ends with `/`, creatable, writable |
-| `backup` | `dir` (default `<data_dir>backup/`) ends with `/`, creatable and writable; `hour_utc` in [0,23]; `retention_days >= 0`; `retention_count >= 0`; `compact_tx_max_bytes > 0` |
+| `backup` | `dir` (default `<data_dir>backup/`) ends with `/`, creatable and writable; `hour_utc` in [0,23]; `retention_days >= 0`; `startup_retention_count >= 0`; `compact_tx_max_bytes > 0` |
 | rules | unique `name`; regexp compiles and cannot match the empty string; template parses; `key` starts with `/`; `hash` names an existing capture group; `hash_minlen >= 4` when `hash` set and not set otherwise |
 | clients | unique `name`; `enabled` clients have at least one token; plaintext tokens >= 32 chars; `tokens_sha256` entries are 64-char lowercase hex; no token/digest appears in more than one client; enabled non-admin clients have >= 1 namespace |
 | namespaces | match `/seg/` (leading and trailing slash), no `..`, no reserved prefix; warn if two clients overlap |
@@ -505,7 +506,8 @@ small even when the live file has free pages.
      skip;
    - startup backup: `links-YYYY-MM-DDTHHMMSS.db` (UTC, second granular); every
      startup gets its own file (C23).
-   Both forms carry the `YYYY-MM-DD` prefix used by retention.
+   Both forms start with `YYYY-MM-DD`; retention tells them apart by the
+   trailing `THHMMSS` in the startup form.
 3. `part := final + ".part"`. Remove any stale `part`.
 4. `dst, err := bolt.Open(part, 0600, &bolt.Options{Timeout: time.Second})`.
 5. `err = bolt.Compact(dst, live, compact_tx_max_bytes)`. This reads the live
@@ -537,12 +539,14 @@ Reopen the compacted file read-only and:
 
 #### 6.6.4 Retention
 
-- List `links-*.db` in `backup.dir` and parse the leading `YYYY-MM-DD` (both
-  filename forms share it). Delete files older than `backup.retention_days`
-  (0 disables). Also remove `*.part` older than one day.
-- Optional `backup.retention_count` caps the number of backup files (0 =
-  unlimited). This bounds a restart loop that produces many same-day startup
-  backups.
+- List `links-*.db` in `backup.dir` and classify each as a startup backup
+  (`links-YYYY-MM-DDTHHMMSS.db`) or a daily backup (`links-YYYY-MM-DD.db`).
+  Delete files older than `backup.retention_days` (0 disables); this applies
+  to both forms. Also remove `*.part` older than one day.
+- Optional `backup.startup_retention_count` caps only the startup backups
+  (0 = unlimited): count them across all dates and drop the oldest. Daily
+  backups are never removed by this cap. This bounds a restart loop that
+  produces many startup backups.
 - Retention runs after a successful backup and at startup.
 - Deletion failures only warn; never fail startup or the job.
 
@@ -564,7 +568,7 @@ Reopen the compacted file read-only and:
   inside it, so publishing is atomic; just ensure it has room for at least one
   compacted database plus retention.
 - Because every startup writes a backup, a crash loop can accumulate files
-  quickly; `retention_count` bounds this.
+  quickly; `startup_retention_count` bounds this.
 - An optional startup integrity check of the live database is future work.
 
 ---
@@ -1146,9 +1150,10 @@ urlshort/
   writer overflow drop path; drain on shutdown.
 - **maintenance**: compact a DB with free pages and verify `Check`, counts, and
   a smaller output file; atomic rename; retention cleanup with an injected
-  clock; `retention_count` cap; scheduled backups skip an existing same-day
-  file while repeated startup backups get unique second-granular names; failure
-  injection (unwritable dir, rename failure) leaves the live DB untouched.
+  clock; `startup_retention_count` cap (daily backups unaffected); scheduled
+  backups skip an existing same-day file while repeated startup backups get
+  unique second-granular names; failure injection (unwritable dir, rename
+  failure) leaves the live DB untouched.
 - **TLS**: handlers tested behind an in-memory cert-manager interface; manual
   cert path; pre-warm logic with a fake `GetCertificate`; `GetCertificate`
   wrapper records the right certificate and ignores challenge handshakes.

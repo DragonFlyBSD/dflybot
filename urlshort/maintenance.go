@@ -35,10 +35,11 @@ type MaintenanceStatus struct {
 
 // Maintenance runs the daily compacted backup and retention.
 type Maintenance struct {
-	cfg    *Config
-	store  Store
-	logger *slog.Logger
-	now    func() time.Time
+	cfg        *Config
+	store      Store
+	logger     *slog.Logger
+	now        func() time.Time
+	filePrefix string
 
 	runMu sync.Mutex
 
@@ -57,11 +58,12 @@ func NewMaintenance(cfg *Config, store Store, base *slog.Logger) *Maintenance {
 	logger := base.With(slog.String("comp", "maintenance"))
 
 	return &Maintenance{
-		cfg:    cfg,
-		store:  store,
-		logger: logger,
-		now:    func() time.Time { return time.Now().UTC() },
-		status: MaintenanceStatus{BackupDir: cfg.Backup.Dir},
+		cfg:        cfg,
+		store:      store,
+		logger:     logger,
+		now:        func() time.Time { return time.Now().UTC() },
+		filePrefix: "links-",
+		status:     MaintenanceStatus{BackupDir: cfg.Backup.Dir},
 	}
 }
 
@@ -156,9 +158,9 @@ func (m *Maintenance) backup(trigger string) error {
 
 	var final string
 	if trigger == "startup" {
-		final = filepath.Join(dir, "links-"+now.Format("2006-01-02T150405")+".db")
+		final = filepath.Join(dir, m.filePrefix+now.Format("2006-01-02T150405")+".db")
 	} else {
-		final = filepath.Join(dir, "links-"+now.Format("2006-01-02")+".db")
+		final = filepath.Join(dir, m.filePrefix+now.Format("2006-01-02")+".db")
 		if linksN, targetsN, err := verifyBoltFile(final); err == nil {
 			m.logger.Info("backup already exists, skipping",
 				"file", final, "links", linksN, "targets", targetsN)
@@ -218,7 +220,7 @@ func (m *Maintenance) record(err error) {
 	m.status.LastBackupOK = true
 	m.status.LastBackupError = ""
 	m.status.LastBackupAt = &now
-	files, _ := listBackups(m.cfg.Backup.Dir)
+	files, _ := m.listBackups()
 	if len(files) > 0 {
 		last := files[len(files)-1]
 		m.status.LastBackupFile = last.path
@@ -228,15 +230,15 @@ func (m *Maintenance) record(err error) {
 	}
 }
 
-// cleanup applies retention_days and retention_count and removes stale .part
-// files. Failures only warn.
+// cleanup applies retention_days to every backup and startup_retention_count
+// to startup backups only, then removes stale .part files. Failures only warn.
 func (m *Maintenance) cleanup(now time.Time) {
 	dir := m.cfg.Backup.Dir
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		m.logger.Warn("backup retention: create dir failed", "error", err)
 		return
 	}
-	files, err := listBackups(dir)
+	files, err := m.listBackups()
 	if err != nil {
 		m.logger.Warn("backup retention listing failed", "error", err)
 		return
@@ -255,11 +257,21 @@ func (m *Maintenance) cleanup(now time.Time) {
 		kept = append(kept, f)
 	}
 
-	if n := m.cfg.Backup.RetentionCount; n > 0 && len(kept) > n {
-		for _, f := range kept[:len(kept)-n] {
-			if err := os.Remove(f.path); err != nil {
-				m.logger.Warn("backup count retention delete failed",
-					"file", f.path, "error", err)
+	// startup_retention_count caps only startup backups; daily backups live out
+	// retention_days in full. Count across all dates and drop the oldest.
+	if n := m.cfg.Backup.StartupRetentionCount; n > 0 {
+		var startups []backupFile
+		for _, f := range kept {
+			if f.startup {
+				startups = append(startups, f)
+			}
+		}
+		if excess := len(startups) - n; excess > 0 {
+			for _, f := range startups[:excess] {
+				if err := os.Remove(f.path); err != nil {
+					m.logger.Warn("startup backup retention delete failed",
+						"file", f.path, "error", err)
+				}
 			}
 		}
 	}
@@ -288,7 +300,7 @@ func (m *Maintenance) Status() MaintenanceStatus {
 	m.mu.Lock()
 	st := m.status
 	m.mu.Unlock()
-	if files, err := listBackups(m.cfg.Backup.Dir); err == nil {
+	if files, err := m.listBackups(); err == nil {
 		st.BackupFiles = len(files)
 	}
 	st.BackupDir = m.cfg.Backup.Dir
@@ -296,12 +308,14 @@ func (m *Maintenance) Status() MaintenanceStatus {
 }
 
 type backupFile struct {
-	path string
-	date time.Time
+	path    string
+	date    time.Time
+	startup bool
 }
 
 // listBackups returns the backup files sorted oldest first.
-func listBackups(dir string) ([]backupFile, error) {
+func (m *Maintenance) listBackups() ([]backupFile, error) {
+	dir := m.cfg.Backup.Dir
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -312,18 +326,20 @@ func listBackups(dir string) ([]backupFile, error) {
 	var out []backupFile
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, "links-") || !strings.HasSuffix(name, ".db") {
+		if e.IsDir() || !strings.HasPrefix(name, m.filePrefix) || !strings.HasSuffix(name, ".db") {
 			continue
 		}
-		rest := strings.TrimSuffix(strings.TrimPrefix(name, "links-"), ".db")
-		if len(rest) < 10 {
-			continue
+		rest := strings.TrimSuffix(strings.TrimPrefix(name, m.filePrefix), ".db")
+		layout := "2006-01-02"
+		startup := len(rest) > len(layout) && rest[len(layout)] == 'T'
+		if startup {
+			layout = "2006-01-02T150405"
 		}
-		d, err := time.ParseInLocation("2006-01-02", rest[:10], time.UTC)
+		d, err := time.ParseInLocation(layout, rest, time.UTC)
 		if err != nil {
 			continue
 		}
-		out = append(out, backupFile{path: filepath.Join(dir, name), date: d})
+		out = append(out, backupFile{path: filepath.Join(dir, name), date: d, startup: startup})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].date.Before(out[j].date) })
 	return out, nil

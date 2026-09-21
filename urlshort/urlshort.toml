@@ -107,9 +107,10 @@ hour_utc = 3
 run_on_start = true
 # Delete backups older than this many days (0 disables deletion).
 retention_days = 30
-# Optional cap on the number of backup files (0 = unlimited); bounds a
-# restart loop that produces many same-day startup backups.
-retention_count = 3
+# Cap the number of startup backups kept (0 = unlimited). Daily backups are
+# governed only by retention_days. Bounds a restart loop that produces many
+# startup backups.
+startup_retention_count = 3
 # Compaction transaction size limit in bytes; bounds memory during compaction.
 compact_tx_max_bytes = 1048576
 
