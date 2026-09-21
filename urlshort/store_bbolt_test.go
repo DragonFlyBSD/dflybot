@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func newTestStore(t *testing.T) *BoltStore {
@@ -73,6 +74,51 @@ func TestStoreCRUD(t *testing.T) {
 	}
 	if _, err := s.Resolve("https://example.com/b"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Resolve after delete: %v", err)
+	}
+}
+
+func TestStoreUpdateIdempotent(t *testing.T) {
+	s := newTestStore(t)
+	base := time.Unix(1700000000, 0)
+	calls := 0
+	s.now = func() time.Time {
+		calls++
+		return base.Add(time.Duration(calls) * time.Second)
+	}
+
+	link, _, err := s.Create("https://example.com/a", "", "", "/a/1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := link.UpdatedAt
+	afterCreate := calls
+
+	// Updating to the same target is a no-op: no write, no updated_at bump,
+	// and the clock is not consulted.
+	again, err := s.Update("/a/1", "https://example.com/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Target != "https://example.com/a" || !again.CreatedAt.Equal(link.CreatedAt) {
+		t.Fatalf("no-op update = %+v", again)
+	}
+	if !again.UpdatedAt.Equal(created) {
+		t.Fatalf("updated_at changed on no-op: %v -> %v", created, again.UpdatedAt)
+	}
+	if calls != afterCreate {
+		t.Fatalf("no-op update consulted the clock")
+	}
+
+	// A real retarget bumps updated_at and re-points the target bucket.
+	changed, err := s.Update("/a/1", "https://example.com/b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed.UpdatedAt.After(created) {
+		t.Fatalf("updated_at not bumped on retarget: %v", changed.UpdatedAt)
+	}
+	if _, err := s.Resolve("https://example.com/a"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old target still resolves: %v", err)
 	}
 }
 

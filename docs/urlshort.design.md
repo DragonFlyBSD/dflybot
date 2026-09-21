@@ -456,8 +456,9 @@ Link record:
 - **List(prefix, limit, cursor)**: forward cursor scan of `links` while
   `bytes.HasPrefix`; `cursor` is the last returned key; `limit` capped at 1000.
 - **Update(key, target)**: in one `Update`, ensure the new target is free or
-  maps to `key`, remove the old `targets` entry, write the new one, bump
-  `updated_at`.
+  maps to `key`; if the target changed, remove the old `targets` entry, write
+  the new one, and bump `updated_at`. A same-target call is a no-op (no write,
+  no `updated_at` change), matching `Create`'s idempotent path.
 - **Delete(key)**: in one `Update`, remove `links[key]` and its `targets`
   entry.
 

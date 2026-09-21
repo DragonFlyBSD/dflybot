@@ -219,14 +219,14 @@ func (s *BoltStore) Update(key, target string) (*Link, error) {
 				return err
 			}
 			l.Target = target
-		}
-		l.UpdatedAt = s.now()
-		nr, err := json.Marshal(&l)
-		if err != nil {
-			return err
-		}
-		if err := links.Put([]byte(key), nr); err != nil {
-			return err
+			l.UpdatedAt = s.now()
+			nr, err := json.Marshal(&l)
+			if err != nil {
+				return err
+			}
+			if err := links.Put([]byte(key), nr); err != nil {
+				return err
+			}
 		}
 		l.Key = key
 		out = &l
