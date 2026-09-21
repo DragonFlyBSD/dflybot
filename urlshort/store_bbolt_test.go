@@ -207,6 +207,18 @@ func TestStoreListPagination(t *testing.T) {
 		t.Fatalf("Count = %d, want %d", n, total+1)
 	}
 
+	// A prefix whose keys do not sort first must still be found (regression:
+	// both List and CountPrefix started at the bucket's first key).
+	if n, err := s.CountPrefix("/other/"); err != nil || n != 1 {
+		t.Fatalf("CountPrefix(/other/) = %d err=%v, want 1", n, err)
+	}
+	if links, _, err := s.List("/other/", 10, ""); err != nil || len(links) != 1 {
+		t.Fatalf("List(/other/) = %d err=%v, want 1", len(links), err)
+	}
+	if links, _, err := s.List("/missing/", 10, ""); err != nil || len(links) != 0 {
+		t.Fatalf("List(/missing/) = %d err=%v, want 0", len(links), err)
+	}
+
 	// Limit cap.
 	links, _, err := s.List("/g/", 5000, "")
 	if err != nil || len(links) != total {

@@ -269,16 +269,16 @@ func (s *BoltStore) List(prefix string, limit int, cursor string) ([]*Link, stri
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(bucketLinks))
 		c := b.Cursor()
+		pfx := []byte(prefix)
 		var k, v []byte
 		if cursor == "" {
-			k, v = c.First()
+			k, v = c.Seek(pfx)
 		} else {
 			k, v = c.Seek([]byte(cursor))
 			if k != nil && string(k) == cursor {
 				k, v = c.Next()
 			}
 		}
-		pfx := []byte(prefix)
 		for ; k != nil && bytes.HasPrefix(k, pfx); k, v = c.Next() {
 			var l Link
 			if err := json.Unmarshal(v, &l); err != nil {
@@ -307,7 +307,7 @@ func (s *BoltStore) CountPrefix(prefix string) (int, error) {
 	err := s.db.View(func(tx *bolt.Tx) error {
 		c := tx.Bucket([]byte(bucketLinks)).Cursor()
 		pfx := []byte(prefix)
-		for k, _ := c.First(); k != nil && bytes.HasPrefix(k, pfx); k, _ = c.Next() {
+		for k, _ := c.Seek(pfx); k != nil && bytes.HasPrefix(k, pfx); k, _ = c.Next() {
 			n++
 		}
 		return nil
