@@ -1205,5 +1205,4 @@ urlshort/
 - Prometheus metrics; richer status counters.
 - Small CLI admin tool.
 - Config hot-reload on SIGHUP for rules/clients.
-- `monitor/` shared client helper and optional `{{shorten}}` template
   function in dflybot.

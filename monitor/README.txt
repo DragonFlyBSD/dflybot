@@ -5,6 +5,7 @@ utilities (git-monitor, jenkins-monitor, ...) that poll remote services
 and announce state changes to IRC via dflybot's webhook API:
 
 - the webhook message poster (Poster/Webhook/NewWebhook),
+- the URL shortener client (Shortener/URLShortener/NewURLShortener),
 - a context cancelled on SIGINT/SIGTERM,
 - a periodic poll loop,
 - atomic JSON state persistence,
