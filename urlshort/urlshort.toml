@@ -85,12 +85,16 @@ http01_fallback = false
 issue_timeout = 60
 
 [rate_limit]
-# Per-source-IP limits for redirects (IPv4 /32, IPv6 /64), and per-token
-# limits for the API. Allowed rates are in requests/second.
+# Per-source-IP limits for redirects and for API requests (IPv4 /32, IPv6 /64),
+# plus per-token limits for authenticated API clients. Rates are in
+# requests/second. api_ip_* is applied before authentication, so it also
+# covers the public endpoints and failed authentication.
 redirect_rate  = 20
 redirect_burst = 40
 api_rate       = 5
 api_burst      = 10
+api_ip_rate    = 20
+api_ip_burst   = 40
 
 [access_log]
 retention_days = 30

@@ -123,6 +123,8 @@ type RateLimitConfig struct {
 	RedirectBurst int     `toml:"redirect_burst"`
 	APIRate       float64 `toml:"api_rate"`
 	APIBurst      int     `toml:"api_burst"`
+	APIIPRate     float64 `toml:"api_ip_rate"`
+	APIIPBurst    int     `toml:"api_ip_burst"`
 }
 
 // AccessLogConfig holds the access log configuration.
@@ -202,6 +204,8 @@ func DefaultConfig() *Config {
 			RedirectBurst: 40,
 			APIRate:       5,
 			APIBurst:      10,
+			APIIPRate:     20,
+			APIIPBurst:    40,
 		},
 		AccessLog: AccessLogConfig{
 			RetentionDays: 30,
@@ -490,6 +494,12 @@ func (c *Config) validateAccess(v *validator) {
 	}
 	if rl.APIBurst < 0 {
 		v.addf("rate_limit.api_burst must be >= 0")
+	}
+	if rl.APIIPRate <= 0 {
+		v.addf("rate_limit.api_ip_rate must be > 0")
+	}
+	if rl.APIIPBurst < 0 {
+		v.addf("rate_limit.api_ip_burst must be >= 0")
 	}
 }
 

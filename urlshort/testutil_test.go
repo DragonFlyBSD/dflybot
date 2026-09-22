@@ -65,6 +65,8 @@ func newTestEnvWith(t *testing.T, mutate func(*Config)) *testEnv {
 		RedirectBurst: 10000,
 		APIRate:       10000,
 		APIBurst:      10000,
+		APIIPRate:     10000,
+		APIIPBurst:    10000,
 	}
 	cfg.Abbreviations = map[string]string{
 		"DragonFlyBSD": "dfbsd",

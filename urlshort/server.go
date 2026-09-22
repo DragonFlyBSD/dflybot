@@ -204,6 +204,7 @@ type Server struct {
 	maintenance *Maintenance
 
 	redirectLimiter *RateLimiter
+	apiIPLimiter    *RateLimiter
 	apiLimiter      *RateLimiter
 	allowedHosts    map[string]bool
 	trustedProxies  []netip.Prefix
@@ -275,6 +276,7 @@ func NewServer(
 		certs:           certs,
 		status:          status,
 		redirectLimiter: NewRateLimiter(cfg.RateLimit.RedirectRate, cfg.RateLimit.RedirectBurst, 10000),
+		apiIPLimiter:    NewRateLimiter(cfg.RateLimit.APIIPRate, cfg.RateLimit.APIIPBurst, 10000),
 		apiLimiter:      NewRateLimiter(cfg.RateLimit.APIRate, cfg.RateLimit.APIBurst, 10000),
 		allowedHosts:    make(map[string]bool),
 		shutdownTimeout: time.Duration(cfg.Server.ShutdownTimeout) * time.Second,

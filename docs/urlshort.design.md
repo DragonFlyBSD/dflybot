@@ -170,6 +170,12 @@ production incidents. Implement and test each one explicitly.
   version plus a link to the API; `/` is therefore reserved (C10).
   `GET /.api/v1` (and `/.api/v1/`) returns an unauthenticated JSON index that
   lists the method and path of every API operation.
+- **C28. API requests are limited per IP before auth.** Every `/.api/v1/`
+  request passes the per-IP `api_ip_rate`/`api_ip_burst` limiter before
+  authentication, so public endpoints, unknown paths, and failed auth cannot
+  flood the service or the constant-time token scan. Non-admin authenticated
+  clients then pass the per-token `api_rate`/`api_burst` limiter. Both return
+  `429` with `Retry-After`.
 
 ---
 
@@ -309,13 +315,17 @@ http01_fallback = false
 # Timeout for each ACME HTTP request (not the whole issuance order) (C18).
 issue_timeout = 60
 
-[access]
-# Per-source-IP limits for redirects (IPv4 /32, IPv6 /64), and per-token
-# limits for the API. Allowed rates are in requests/second.
+[rate_limit]
+# Per-source-IP limits for redirects and for API requests (IPv4 /32, IPv6 /64),
+# plus per-token limits for authenticated API clients. Rates are in
+# requests/second. api_ip_* is applied before authentication, so it also covers
+# the public endpoints and failed authentication.
 redirect_rate  = 20
 redirect_burst = 40
 api_rate       = 5
 api_burst      = 10
+api_ip_rate    = 20
+api_ip_burst   = 40
 
 [access_log]
 retention_days = 30
@@ -706,8 +716,10 @@ When no rule matches:
 
 Order matters:
 
-1. `/.api/...` -> API mux. `GET /.api/v1` (and `/.api/v1/`) returns the
-   unauthenticated API index; all other endpoints authenticate.
+1. `/.api/...` -> API mux. Every request passes the per-IP API limiter before
+   authentication. `GET /.api/v1` (and `/.api/v1/`) returns the
+   unauthenticated API index; all other endpoints authenticate, and non-admin
+   authenticated clients are additionally limited per token.
 2. `/.well-known/...` -> `404`.
 3. `/` -> `200` home page (GET/HEAD only).
 4. `/robots.txt` -> `200`, body `User-agent: *\nDisallow: /\n` (GET/HEAD only).
@@ -732,7 +744,10 @@ Order matters:
 
 Base path `/.api/v1`. All endpoints except `/health` and the API index require
 `Authorization: Bearer <token>`. JSON in and out. Body limit 64 KiB,
-`DisallowUnknownFields`.
+`DisallowUnknownFields`. Every request first passes the per-IP
+`api_ip_rate`/`api_ip_burst` limiter, before authentication; non-admin
+authenticated clients are additionally limited per token by `api_rate`/
+`api_burst`. Exceeding either returns `429` with `Retry-After`.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -1052,10 +1067,12 @@ that the operator owns renewal.
 - Host validation and `public_url`-derived links (C7).
 - Key and target validation as in §7.5; target schemes `http`/`https` only;
   target length <= 8 KiB; reject userinfo.
-- Rate limiting: per-IP for redirects (IPv4 /32, IPv6 /64) and per-token for
-  the API, using `golang.org/x/time/rate` plus a bounded LRU (cap entries and
-  periodically evict) so spoofed sources cannot exhaust memory. `429` with
-  `Retry-After`.
+- Rate limiting, using `golang.org/x/time/rate` plus a bounded LRU (cap
+  entries and periodically evict) so spoofed sources cannot exhaust memory:
+  per-IP for redirects; per-IP for every API request before authentication
+  (covering public endpoints, unknown paths, and failed auth, and shielding
+  the constant-time token scan); and per-token for authenticated non-admin API
+  clients. `429` with `Retry-After`.
 - Constant-time token comparison (C12); no token logging.
 - Never fetch target URLs (no SSRF).
 - Response headers: `X-Content-Type-Options: nosniff`, `Referrer-Policy:

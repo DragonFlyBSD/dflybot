@@ -43,23 +43,69 @@ func isAPIPath(p string) bool {
 	return p == apiBase || strings.HasPrefix(p, apiBase+"/")
 }
 
-// apiEndpoint is one operation listed by the API index.
+// apiAuth is the token requirement of an endpoint.
+type apiAuth uint8
+
+const (
+	authPublic apiAuth = iota // no token required
+	authAny                   // any valid token
+	authAdmin                 // admin token only
+)
+
+// apiEndpoint describes one API path: its allowed methods, token
+// requirement, and handler. The fields are unexported; the index is rendered
+// from this table.
 type apiEndpoint struct {
+	methods []string
+	path    string
+	auth    apiAuth
+	// limit applies the per-token limiter after authentication. Admin
+	// endpoints skip it but are still subject to the per-IP limiter.
+	limit  bool
+	handle func(*Server, http.ResponseWriter, *http.Request, *Client)
+}
+
+// apiEndpoints is the single source of truth for routing, authentication, and
+// the API index. It is populated in init to break the initialization cycle
+// between the table (which references the handlers) and apiIndex (which reads
+// the table).
+var apiEndpoints []apiEndpoint
+
+func init() {
+	apiEndpoints = []apiEndpoint{
+		{[]string{http.MethodGet}, apiBase, authPublic, false, (*Server).handleAPIIndex},
+		{[]string{http.MethodGet}, apiPathHealth, authPublic, false, (*Server).handleHealth},
+		{[]string{http.MethodGet}, apiPathStatus, authAdmin, false, (*Server).handleStatus},
+		{[]string{http.MethodGet}, apiPathWhoami, authAny, true, (*Server).handleWhoami},
+		{[]string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete},
+			apiPathLinks, authAny, true, (*Server).handleLinks},
+	}
+}
+
+// apiIndexEntry is one method/path row in the API index.
+type apiIndexEntry struct {
 	Method string `json:"method"`
 	Path   string `json:"path"`
 }
 
-// apiEndpoints lists every supported API operation. Keep it in sync with the
-// dispatch in handleAPI.
-var apiEndpoints = []apiEndpoint{
-	{http.MethodGet, apiBase},
-	{http.MethodGet, apiPathHealth},
-	{http.MethodGet, apiPathStatus},
-	{http.MethodGet, apiPathWhoami},
-	{http.MethodPost, apiPathLinks},
-	{http.MethodGet, apiPathLinks},
-	{http.MethodPut, apiPathLinks},
-	{http.MethodDelete, apiPathLinks},
+// apiIndex expands the endpoint table into method/path rows.
+func apiIndex() []apiIndexEntry {
+	var out []apiIndexEntry
+	for _, ep := range apiEndpoints {
+		for _, m := range ep.methods {
+			out = append(out, apiIndexEntry{Method: m, Path: ep.path})
+		}
+	}
+	return out
+}
+
+func findAPIEndpoint(path string) *apiEndpoint {
+	for i := range apiEndpoints {
+		if apiEndpoints[i].path == path {
+			return &apiEndpoints[i]
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -136,54 +182,39 @@ func requireMethod(w http.ResponseWriter, r *http.Request, methods ...string) bo
 // Dispatch and authentication
 
 func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
-	switch r.URL.Path {
-	case apiBase, apiBase + "/":
-		s.handleAPIIndex(w, r)
-	case apiPathHealth:
-		if !requireMethod(w, r, http.MethodGet) {
-			return
-		}
-		s.handleHealth(w, r)
-	case apiPathStatus:
-		c, ok := s.authenticate(w, r)
+	path := r.URL.Path
+	if path == apiBase+"/" {
+		path = apiBase
+	}
+	if !s.allowAPIIP(w, r) {
+		return
+	}
+
+	ep := findAPIEndpoint(path)
+	if ep == nil {
+		writeAPIError(w, http.StatusNotFound, "not_found", "unknown endpoint")
+		return
+	}
+	if !requireMethod(w, r, ep.methods...) {
+		return
+	}
+
+	var c *Client
+	if ep.auth != authPublic {
+		ok := false
+		c, ok = s.authenticate(w, r)
 		if !ok {
 			return
 		}
-		if !s.allowAPI(w, c) {
-			return
-		}
-		if !c.IsAdmin {
+		if ep.auth == authAdmin && !c.IsAdmin {
 			writeAPIError(w, http.StatusForbidden, "forbidden", "admin required")
 			return
 		}
-		if !requireMethod(w, r, http.MethodGet) {
-			return
-		}
-		s.handleStatus(w, r)
-	case apiPathWhoami:
-		c, ok := s.authenticate(w, r)
-		if !ok {
-			return
-		}
-		if !s.allowAPI(w, c) {
-			return
-		}
-		if !requireMethod(w, r, http.MethodGet) {
-			return
-		}
-		s.handleWhoami(w, r, c)
-	case apiPathLinks:
-		c, ok := s.authenticate(w, r)
-		if !ok {
-			return
-		}
-		if !s.allowAPI(w, c) {
-			return
-		}
-		s.handleLinks(w, r, c)
-	default:
-		writeAPIError(w, http.StatusNotFound, "not_found", "unknown endpoint")
 	}
+	if ep.limit && !s.allowAPI(w, c) {
+		return
+	}
+	ep.handle(s, w, r, c)
 }
 
 func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (*Client, bool) {
@@ -212,21 +243,35 @@ func (s *Server) allowAPI(w http.ResponseWriter, c *Client) bool {
 	return false
 }
 
+// allowAPIIP applies the per-IP limiter to every API request before
+// authentication, covering public endpoints, unknown paths, and failed
+// authentication (which must not be able to flood the constant-time token
+// scan).
+func (s *Server) allowAPIIP(w http.ResponseWriter, r *http.Request) bool {
+	key := rateKey(clientIPFrom(r))
+	if key == "" {
+		key = r.RemoteAddr
+	}
+	if s.apiIPLimiter.Allow(key) {
+		return true
+	}
+	w.Header().Set("Retry-After", "1")
+	writeAPIError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
+	return false
+}
+
 // ---------------------------------------------------------------------------
 // Simple endpoints
 
-func (s *Server) handleAPIIndex(w http.ResponseWriter, r *http.Request) {
-	if !requireMethod(w, r, http.MethodGet) {
-		return
-	}
+func (s *Server) handleAPIIndex(w http.ResponseWriter, r *http.Request, _ *Client) {
 	writeJSON(w, http.StatusOK, struct {
-		Name      string        `json:"name"`
-		Version   string        `json:"version"`
-		Endpoints []apiEndpoint `json:"endpoints"`
-	}{programName, version, apiEndpoints})
+		Name      string          `json:"name"`
+		Version   string          `json:"version"`
+		Endpoints []apiIndexEntry `json:"endpoints"`
+	}{programName, version, apiIndex()})
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request, _ *Client) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -699,7 +744,7 @@ type statusError struct {
 	Message string    `json:"message"`
 }
 
-func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, _ *Client) {
 	total, err := s.store.Count()
 	if err != nil {
 		s.writeInternalError(w, err, "status count failed")

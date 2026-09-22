@@ -34,8 +34,8 @@ func TestAPIIndex(t *testing.T) {
 		if body.Name != programName || body.Version != version {
 			t.Errorf("GET %s: name/version = %q/%q", path, body.Name, body.Version)
 		}
-		if len(body.Endpoints) != len(apiEndpoints) {
-			t.Errorf("GET %s: %d endpoints, want %d", path, len(body.Endpoints), len(apiEndpoints))
+		if len(body.Endpoints) != len(apiIndex()) {
+			t.Errorf("GET %s: %d endpoints, want %d", path, len(body.Endpoints), len(apiIndex()))
 		}
 	}
 }
@@ -44,7 +44,7 @@ func TestAPIIndex(t *testing.T) {
 // actually handled by handleAPI.
 func TestAPIIndexCoversRoutes(t *testing.T) {
 	e := newTestEnv(t)
-	for _, ep := range apiEndpoints {
+	for _, ep := range apiIndex() {
 		if !isAPIPath(ep.Path) {
 			t.Errorf("%s %s: not an API path", ep.Method, ep.Path)
 		}
@@ -52,6 +52,62 @@ func TestAPIIndexCoversRoutes(t *testing.T) {
 		if rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed {
 			t.Errorf("%s %s = %d", ep.Method, ep.Path, rec.Code)
 		}
+	}
+}
+
+// TestAPIIPRateLimit checks the per-IP API limiter applied to public and
+// unknown endpoints, and its JSON 429 envelope.
+func TestAPIIPRateLimit(t *testing.T) {
+	e := newTestEnvWith(t, func(c *Config) {
+		c.RateLimit.APIIPRate = 0.0001
+		c.RateLimit.APIIPBurst = 1
+	})
+	if rec := e.request(http.MethodGet, apiPathHealth, "", nil, nil); rec.Code != http.StatusOK {
+		t.Fatalf("first health = %d", rec.Code)
+	}
+	rec := e.request(http.MethodGet, apiPathHealth, "", nil, nil)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second health = %d, want 429", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("429 missing Retry-After")
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("429 Content-Type = %q", ct)
+	}
+}
+
+// TestAPIIPRateLimitPreAuth checks that the IP limiter runs before
+// authentication, so failed auth cannot flood the token scan.
+func TestAPIIPRateLimitPreAuth(t *testing.T) {
+	e := newTestEnvWith(t, func(c *Config) {
+		c.RateLimit.APIIPRate = 0.0001
+		c.RateLimit.APIIPBurst = 1
+	})
+	if rec := e.request(http.MethodGet, apiBase+"/nope", "", nil, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown endpoint = %d", rec.Code)
+	}
+	rec := e.request(http.MethodGet, apiPathWhoami, "bad-token", nil, nil)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("bad-token request = %d, want 429 before auth", rec.Code)
+	}
+}
+
+// TestAPIAdminSubjectToIPLimit checks that admin endpoints skip the per-token
+// limiter but still hit the per-IP limiter.
+func TestAPIAdminSubjectToIPLimit(t *testing.T) {
+	e := newTestEnvWith(t, func(c *Config) {
+		c.RateLimit.APIIPRate = 0.0001
+		c.RateLimit.APIIPBurst = 1
+		c.RateLimit.APIRate = 10000
+		c.RateLimit.APIBurst = 10000
+	})
+	if rec := e.request(http.MethodGet, apiPathStatus, testAdminToken, nil, nil); rec.Code != http.StatusOK {
+		t.Fatalf("first status = %d", rec.Code)
+	}
+	rec := e.request(http.MethodGet, apiPathStatus, testAdminToken, nil, nil)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second status = %d, want 429", rec.Code)
 	}
 }
 
