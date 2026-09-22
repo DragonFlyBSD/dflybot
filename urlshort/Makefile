@@ -19,6 +19,10 @@ test:
 	go vet ./...
 	go test ./...
 
+.PHONY: bench
+bench:
+	go test -run '^$$' -bench . -benchmem ./...
+
 .PHONY: clean
 clean:
 	rm -f $(NAME) $(NAME).linux $(NAME).dragonfly
