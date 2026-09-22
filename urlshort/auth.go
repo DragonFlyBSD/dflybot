@@ -76,7 +76,7 @@ func (a *Authenticator) Authenticate(token string) (*Client, bool) {
 	return matched, matched != nil
 }
 
-// CanAccess reports whether the client may read or write key.
+// CanAccess reports whether the client may read or write key/namespace.
 func (c *Client) CanAccess(key string) bool {
 	if c.IsAdmin {
 		return true

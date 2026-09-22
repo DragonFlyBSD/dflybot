@@ -59,26 +59,23 @@ type apiEndpoint struct {
 	methods []string
 	path    string
 	auth    apiAuth
-	// limit applies the per-token limiter after authentication. Admin
-	// endpoints skip it but are still subject to the per-IP limiter.
-	limit  bool
-	handle func(*Server, http.ResponseWriter, *http.Request, *Client)
+	handle  func(*Server, http.ResponseWriter, *http.Request, *Client)
 }
 
 // apiEndpoints is the single source of truth for routing, authentication, and
-// the API index. It is populated in init to break the initialization cycle
+// the API index. It is populated in init() to break the initialization cycle
 // between the table (which references the handlers) and apiIndex (which reads
 // the table).
 var apiEndpoints []apiEndpoint
 
 func init() {
 	apiEndpoints = []apiEndpoint{
-		{[]string{http.MethodGet}, apiBase, authPublic, false, (*Server).handleAPIIndex},
-		{[]string{http.MethodGet}, apiPathHealth, authPublic, false, (*Server).handleHealth},
-		{[]string{http.MethodGet}, apiPathStatus, authAdmin, false, (*Server).handleStatus},
-		{[]string{http.MethodGet}, apiPathWhoami, authAny, true, (*Server).handleWhoami},
+		{[]string{http.MethodGet}, apiBase, authPublic, (*Server).handleAPIIndex},
+		{[]string{http.MethodGet}, apiPathHealth, authPublic, (*Server).handleHealth},
+		{[]string{http.MethodGet}, apiPathStatus, authAdmin, (*Server).handleStatus},
+		{[]string{http.MethodGet}, apiPathWhoami, authAny, (*Server).handleWhoami},
 		{[]string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete},
-			apiPathLinks, authAny, true, (*Server).handleLinks},
+			apiPathLinks, authAny, (*Server).handleLinks},
 	}
 }
 
@@ -97,15 +94,6 @@ func apiIndex() []apiIndexEntry {
 		}
 	}
 	return out
-}
-
-func findAPIEndpoint(path string) *apiEndpoint {
-	for i := range apiEndpoints {
-		if apiEndpoints[i].path == path {
-			return &apiEndpoints[i]
-		}
-	}
-	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -182,15 +170,18 @@ func requireMethod(w http.ResponseWriter, r *http.Request, methods ...string) bo
 // Dispatch and authentication
 
 func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-	if path == apiBase+"/" {
-		path = apiBase
-	}
 	if !s.allowAPIIP(w, r) {
 		return
 	}
 
-	ep := findAPIEndpoint(path)
+	path := strings.TrimSuffix(r.URL.Path, "/")
+	var ep *apiEndpoint
+	for i := range apiEndpoints {
+		if apiEndpoints[i].path == path {
+			ep = &apiEndpoints[i]
+			break
+		}
+	}
 	if ep == nil {
 		writeAPIError(w, http.StatusNotFound, "not_found", "unknown endpoint")
 		return
@@ -211,9 +202,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if ep.limit && !s.allowAPI(w, c) {
+	if ep.auth == authAny && !s.allowAPI(w, c) {
 		return
 	}
+
 	ep.handle(s, w, r, c)
 }
 
@@ -221,7 +213,8 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (*Client, 
 	const prefix = "Bearer "
 	h := r.Header.Get("Authorization")
 	if !strings.HasPrefix(h, prefix) {
-		writeAPIError(w, http.StatusUnauthorized, "unauthorized", "missing or malformed Authorization header")
+		writeAPIError(w, http.StatusUnauthorized, "unauthorized",
+			"missing or malformed Authorization header")
 		return nil, false
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(h, prefix))
@@ -245,19 +238,15 @@ func (s *Server) allowAPI(w http.ResponseWriter, c *Client) bool {
 
 // allowAPIIP applies the per-IP limiter to every API request before
 // authentication, covering public endpoints, unknown paths, and failed
-// authentication (which must not be able to flood the constant-time token
-// scan).
+// authentication.
 func (s *Server) allowAPIIP(w http.ResponseWriter, r *http.Request) bool {
 	key := rateKey(clientIPFrom(r))
-	if key == "" {
-		key = r.RemoteAddr
+	if key == "" || !s.apiIPLimiter.Allow(key) {
+		w.Header().Set("Retry-After", "1")
+		writeAPIError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
+		return false
 	}
-	if s.apiIPLimiter.Allow(key) {
-		return true
-	}
-	w.Header().Set("Retry-After", "1")
-	writeAPIError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
-	return false
+	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -364,8 +353,10 @@ func (s *Server) getLink(w http.ResponseWriter, r *http.Request, c *Client) {
 		s.storeError(w, err, "Get link failed")
 		return
 	}
-	accessInfoFrom(r).Action = "resolve"
-	accessInfoFrom(r).Key = key
+
+	ai := accessInfoFrom(r)
+	ai.Action = "resolve"
+	ai.Key = key
 	writeJSON(w, http.StatusOK, s.linkView(link))
 }
 
@@ -394,7 +385,7 @@ func (s *Server) listLinks(w http.ResponseWriter, r *http.Request, c *Client) {
 	)
 	switch {
 	case nsParam != "":
-		if !c.IsAdmin && !clientOwnsPrefix(c, nsParam) {
+		if !c.CanAccess(nsParam) {
 			writeAPIError(w, http.StatusForbidden, "forbidden",
 				"namespace is outside the caller's namespaces")
 			return
@@ -428,7 +419,7 @@ func (s *Server) listFiltered(c *Client, limit int, cursor string) ([]*Link, str
 	out := []*Link{}
 	next := cursor
 	for len(out) < limit {
-		batch, n, err := s.store.List("", 1000, next)
+		batch, n, err := s.store.List("", limit, next)
 		if err != nil {
 			return nil, "", err
 		}
@@ -450,15 +441,6 @@ func (s *Server) listFiltered(c *Client, limit int, cursor string) ([]*Link, str
 		next = n
 	}
 	return out, next, nil
-}
-
-func clientOwnsPrefix(c *Client, ns string) bool {
-	for _, own := range c.Namespaces {
-		if strings.HasPrefix(ns, own) {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Server) createLink(w http.ResponseWriter, r *http.Request, c *Client) {
@@ -616,19 +598,9 @@ func canonicalizeTarget(raw string) (string, error) {
 }
 
 func (s *Server) updateLink(w http.ResponseWriter, r *http.Request, c *Client) {
-	key := r.URL.Query().Get("key")
-	if key == "" {
-		writeAPIError(w, http.StatusBadRequest, "bad_request",
-			"key query parameter is required")
-		return
-	}
-	if !c.CanAccess(key) {
-		writeAPIError(w, http.StatusForbidden, "forbidden",
-			"key is outside the caller's namespaces")
-		return
-	}
 	var req struct {
 		Target string `json:"target"`
+		Key    string `json:"key"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -639,14 +611,25 @@ func (s *Server) updateLink(w http.ResponseWriter, r *http.Request, c *Client) {
 			"invalid target: "+err.Error())
 		return
 	}
-	link, err := s.store.Update(key, target)
+	if req.Key == "" {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "key is required")
+		return
+	}
+	if !c.CanAccess(req.Key) {
+		writeAPIError(w, http.StatusForbidden, "forbidden",
+			"key is outside the caller's namespaces")
+		return
+	}
+
+	link, err := s.store.Update(req.Key, target)
 	if err != nil {
 		s.storeError(w, err, "Update link failed")
 		return
 	}
+
 	ai := accessInfoFrom(r)
 	ai.Action = "update"
-	ai.Key = key
+	ai.Key = req.Key
 	ai.Target = link.Target
 	writeJSON(w, http.StatusOK, s.linkView(link))
 }
@@ -750,6 +733,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, _ *Client)
 		s.writeInternalError(w, err, "status count failed")
 		return
 	}
+	dbStats, err := s.store.Stats()
+	if err != nil {
+		s.writeInternalError(w, err, "status db stats failed")
+		return
+	}
+
 	nsSet := map[string]bool{}
 	for _, c := range s.auth.Clients() {
 		for _, ns := range c.Namespaces {
@@ -773,12 +762,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, _ *Client)
 			Namespaces: c.Namespaces,
 			Admin:      c.IsAdmin,
 		})
-	}
-
-	dbStats, err := s.store.Stats()
-	if err != nil {
-		s.writeInternalError(w, err, "status db stats failed")
-		return
 	}
 
 	startedAt := s.status.StartedAt()

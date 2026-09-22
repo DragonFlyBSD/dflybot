@@ -263,8 +263,8 @@ func TestAPIGetUpdateDelete(t *testing.T) {
 		t.Fatalf("target = %q", view.Target)
 	}
 
-	rec = e.request(http.MethodPut, apiPathLinks+"?key=/g/one", testAdminToken,
-		map[string]string{"target": "https://example.org/two"}, nil)
+	rec = e.request(http.MethodPut, apiPathLinks, testAdminToken,
+		map[string]string{"target": "https://example.org/two", "key": "/g/one"}, nil)
 	if rec.Code != 200 {
 		t.Fatalf("put = %d body=%s", rec.Code, rec.Body.String())
 	}

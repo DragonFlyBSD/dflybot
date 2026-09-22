@@ -758,9 +758,8 @@ authenticated clients are additionally limited per token by `api_rate`/
 | POST | `/links` | any | resolve or create a key for a target |
 | GET | `/links?key=` | any | fetch one link |
 | GET | `/links?namespace=&limit=&cursor=` | any | list links by prefix |
-| PUT | `/links?key=` | any | retarget a link |
+| PUT | `/links` | any | retarget a link |
 | DELETE | `/links?key=` | any | delete a link |
-| POST | `/links/batch` | - | deferred; not in v1 |
 
 ### 10.1 `POST /links`
 
@@ -1208,5 +1207,3 @@ urlshort/
 - Config hot-reload on SIGHUP for rules/clients.
 - `monitor/` shared client helper and optional `{{shorten}}` template
   function in dflybot.
-- Additional domains / wildcard certificates (requires DNS-01, which autocert
-  does not support).
