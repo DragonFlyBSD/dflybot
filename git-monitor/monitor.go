@@ -13,11 +13,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"sort"
 	"strings"
 	"sync"
+	"text/template"
 	"time"
 
 	"github.com/liweitianux/dflybot/monitor"
@@ -26,17 +28,21 @@ import (
 type MonitorConfig struct {
 	Name      string
 	RepoURL   string
+	CommitURL string
 	RepoDir   string
 	StatePath string
 	Interval  time.Duration
 	Poster    monitor.Poster
+	// Shortener is optional; when nil, the full commit URL is announced.
+	Shortener monitor.Shortener
 }
 
 type Monitor struct {
-	config *MonitorConfig
-	state  State
-	mutex  sync.Mutex
-	logger *slog.Logger
+	config    *MonitorConfig
+	state     State
+	mutex     sync.Mutex
+	logger    *slog.Logger
+	commitURL *template.Template
 }
 
 // State persisted to disk to avoid duplicates.
@@ -49,20 +55,37 @@ type State struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-func NewMonitor(cfg *MonitorConfig, base *slog.Logger) *Monitor {
+func NewMonitor(cfg *MonitorConfig, base *slog.Logger) (*Monitor, error) {
+	var commitURL *template.Template
+	if cfg.CommitURL != "" {
+		tpl, err := template.New(cfg.Name).Parse(cfg.CommitURL)
+		if err != nil {
+			return nil, err
+		}
+		var buf bytes.Buffer
+		if err := tpl.Execute(&buf, &commitInfo{}); err != nil {
+			return nil, err
+		}
+		if _, err := url.Parse(buf.String()); err != nil {
+			return nil, err
+		}
+		commitURL = tpl
+	}
+
 	if base == nil {
 		base = slog.Default()
 	}
 	logger := base.With(slog.String("repo", cfg.Name))
 
 	return &Monitor{
-		config: cfg,
-		logger: logger,
+		config:    cfg,
+		logger:    logger,
+		commitURL: commitURL,
 		state: State{
 			LastSeen: make(map[string]string),
 			SeenTags: make(map[string]string),
 		},
-	}
+	}, nil
 }
 
 func (m *Monitor) Start(ctx context.Context, wg *sync.WaitGroup) {
@@ -226,6 +249,7 @@ type announcement struct {
 	info       *commitInfo
 	tagUpdated bool
 	isMerge    bool
+	link       string // resolved (possibly shortened) commit URL
 }
 
 // collectAnnouncements finds new commits and tags and returns formatted
@@ -322,6 +346,8 @@ func (m *Monitor) collectAnnouncements() []*announcement {
 }
 
 func (m *Monitor) sendAnnouncements(ctx context.Context, ans []*announcement) {
+	m.resolveLinks(ctx, ans)
+
 	// Announce tags: one tag per message
 	for _, a := range ans {
 		if a.tag == "" {
@@ -331,9 +357,8 @@ func (m *Monitor) sendAnnouncements(ctx context.Context, ans []*announcement) {
 		if a.tagUpdated {
 			tag += " (updated)"
 		}
-		msg := fmt.Sprintf("[%s] %s %s <%s> (%s) %s",
-			m.config.Name, tag, a.info.AuthorName, a.info.AuthorEmail,
-			shortSHA(a.info.Hash), sanitize(a.info.Subject))
+		msg := fmt.Sprintf("[%s] %s — %s",
+			m.config.Name, tag, formatCommit(a.info, a.link))
 		m.logger.Info("announce tag", "tag", a.tag, "msg", msg)
 		m.config.Poster.Post(ctx, msg)
 	}
@@ -344,13 +369,10 @@ func (m *Monitor) sendAnnouncements(ctx context.Context, ans []*announcement) {
 		if a.branch == "" {
 			continue
 		}
-		subj := sanitize(a.info.Subject)
+		msg := formatCommit(a.info, a.link)
 		if a.isMerge {
-			subj = "(merge) " + subj
+			msg = "(merge) " + msg
 		}
-		msg := fmt.Sprintf("%s <%s> (%s) %s",
-			a.info.AuthorName, a.info.AuthorEmail,
-			shortSHA(a.info.Hash), subj)
 		msgs[a.branch] = append(msgs[a.branch], msg)
 	}
 	// Order by branches
@@ -395,6 +417,85 @@ func (m *Monitor) sendAnnouncements(ctx context.Context, ans []*announcement) {
 			m.config.Poster.Post(ctx, msg)
 		}
 	}
+}
+
+// resolveLinks renders each announcement's commit URL and replaces it with
+// the shortened form when a shortener is configured.  Failures fall back to
+// the full URL so an announcement is never dropped.
+func (m *Monitor) resolveLinks(ctx context.Context, ans []*announcement) {
+	for _, a := range ans {
+		if a.info == nil || m.commitURL == nil {
+			continue
+		}
+		var buf bytes.Buffer
+		if err := m.commitURL.Execute(&buf, a.info); err != nil {
+			m.logger.Warn("render commit_url failed", "hash", a.info.Hash, "error", err)
+			continue
+		}
+		a.link = buf.String()
+	}
+
+	if m.config.Shortener == nil {
+		return
+	}
+
+	// Shorten each unique URL once, with a small concurrency bound.  The
+	// same commit may be announced on several branches.
+	const workers = 4
+	var (
+		mu   sync.Mutex
+		wg   sync.WaitGroup
+		sem  = make(chan struct{}, workers)
+		urls = make(map[string]string)
+	)
+	for _, a := range ans {
+		if a.link == "" {
+			continue
+		}
+		full := a.link
+		mu.Lock()
+		if _, reserved := urls[full]; reserved {
+			mu.Unlock()
+			continue
+		}
+		urls[full] = full // reserve, with the full URL as fallback
+		mu.Unlock()
+
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(full string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			short, err := m.config.Shortener.Shorten(ctx, full)
+			if err != nil {
+				m.logger.Warn("URL shortening failed; using full URL",
+					"url", full, "error", err)
+				return
+			}
+			mu.Lock()
+			urls[full] = short
+			mu.Unlock()
+		}(full)
+	}
+	wg.Wait()
+
+	for _, a := range ans {
+		if short, ok := urls[a.link]; ok {
+			a.link = short
+		}
+	}
+}
+
+// formatCommit builds "subject — author — link", omitting empty fields.
+func formatCommit(ci *commitInfo, link string) string {
+	s := sanitize(ci.Subject)
+	if author := sanitize(ci.AuthorName); author != "" {
+		s += " — " + author
+	}
+	if link != "" {
+		s += " — " + link
+	}
+	return s
 }
 
 // listRefs returns map of shortname->sha for refs under the provided prefix.
@@ -523,14 +624,6 @@ func (m *Monitor) derefTagToCommit(tag string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
-}
-
-// shortSHA returns short form
-func shortSHA(sha string) string {
-	if len(sha) >= 7 {
-		return sha[:7]
-	}
-	return sha
 }
 
 // sanitize commit subject/body for IRC: replace newlines/tabs and collapse spaces.

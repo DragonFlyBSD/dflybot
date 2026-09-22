@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"text/template"
 	"time"
 )
 
@@ -429,6 +431,118 @@ func TestAnnotatedTag_UpdateAnnouncement(t *testing.T) {
 
 //------------------------------------------------------------------------------
 
+func TestSendAnnouncements_WithShortener(t *testing.T) {
+	ctx := context.Background()
+	poster := newTestPoster(1024)
+	shortener := &testShortener{short: "https://s.example/g/d/cccccccc"}
+
+	m := &Monitor{
+		config: &MonitorConfig{
+			Name:      "testproj",
+			Poster:    poster,
+			Shortener: shortener,
+		},
+		commitURL: commitURLTemplate(t),
+		logger:    slog.Default(),
+	}
+
+	hash := "cccccccccccccccccccccccccccccccccccccccc"
+	m.sendAnnouncements(ctx, []*announcement{{
+		branch: "master",
+		info: &commitInfo{
+			Hash:        hash,
+			AuthorName:  "Carol",
+			AuthorEmail: "carol@example.com",
+			Subject:     "fix bug",
+		},
+	}})
+
+	msgs := poster.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %v", msgs)
+	}
+	want := "[testproj:master] fix bug — Carol — https://s.example/g/d/cccccccc"
+	if msgs[0] != want {
+		t.Fatalf("message = %q, want %q", msgs[0], want)
+	}
+	if strings.Contains(msgs[0], "carol@example.com") {
+		t.Errorf("message should not contain the email: %s", msgs[0])
+	}
+	calls := shortener.Calls()
+	if len(calls) != 1 || calls[0] != "https://gitweb.example/commit/"+hash {
+		t.Fatalf("shortener calls = %v", calls)
+	}
+}
+
+func TestSendAnnouncements_ShortenerFallback(t *testing.T) {
+	ctx := context.Background()
+	poster := newTestPoster(1024)
+	shortener := &testShortener{err: errors.New("boom")}
+
+	m := &Monitor{
+		config: &MonitorConfig{
+			Name:      "testproj",
+			Poster:    poster,
+			Shortener: shortener,
+		},
+		commitURL: commitURLTemplate(t),
+		logger:    slog.Default(),
+	}
+
+	hash := "dddddddddddddddddddddddddddddddddddddddd"
+	m.sendAnnouncements(ctx, []*announcement{{
+		branch: "master",
+		info: &commitInfo{
+			Hash:       hash,
+			AuthorName: "Dave",
+			Subject:    "merge feature",
+		},
+	}})
+
+	msgs := poster.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %v", msgs)
+	}
+	if !strings.Contains(msgs[0], "https://gitweb.example/commit/"+hash) {
+		t.Fatalf("expected full URL fallback, got %q", msgs[0])
+	}
+}
+
+func TestSendAnnouncements_TagWithShortener(t *testing.T) {
+	ctx := context.Background()
+	poster := newTestPoster(1024)
+	shortener := &testShortener{short: "https://s.example/g/d/eeeeeeee"}
+
+	m := &Monitor{
+		config: &MonitorConfig{
+			Name:      "testproj",
+			Poster:    poster,
+			Shortener: shortener,
+		},
+		commitURL: commitURLTemplate(t),
+		logger:    slog.Default(),
+	}
+
+	m.sendAnnouncements(ctx, []*announcement{{
+		tag:        "v1.0",
+		tagUpdated: true,
+		info: &commitInfo{
+			Hash:       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+			AuthorName: "Eve",
+			Subject:    "release v1.0",
+		},
+	}})
+
+	msgs := poster.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %v", msgs)
+	}
+	want := "[testproj] tag:v1.0 (updated) — release v1.0 — Eve — https://s.example/g/d/eeeeeeee"
+	if msgs[0] != want {
+		t.Fatalf("message = %q, want %q", msgs[0], want)
+	}
+}
+
 type testPoster struct {
 	mu       sync.Mutex
 	maxLen   int
@@ -459,6 +573,38 @@ func (p *testPoster) Messages() []string {
 	cp := make([]string, len(p.messages))
 	copy(cp, p.messages)
 	return cp
+}
+
+type testShortener struct {
+	mu    sync.Mutex
+	short string
+	err   error
+	calls []string
+}
+
+func (s *testShortener) Shorten(ctx context.Context, target string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, target)
+	if s.err != nil {
+		return "", s.err
+	}
+	return s.short, nil
+}
+
+func (s *testShortener) Calls() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.calls...)
+}
+
+func commitURLTemplate(t *testing.T) *template.Template {
+	t.Helper()
+	tpl, err := template.New("commit_url").Parse("https://gitweb.example/commit/{{ .Hash }}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tpl
 }
 
 func TestSendAnnouncements_Empty(t *testing.T) {

@@ -34,6 +34,9 @@ type Config struct {
 	DataDir string `toml:"data_dir" validate:"dirpath"`
 	// Webhook settings
 	Webhook monitor.ConfigWebhook `toml:"webhook" validate:"required"`
+	// URL shortener settings (optional; when absent the full commit URL is
+	// announced)
+	URLShort *monitor.ConfigURLShort `toml:"urlshort"`
 	// List of monitor repos
 	Repos []ConfigRepo `toml:"repos" validate:"required"`
 }
@@ -45,6 +48,10 @@ type ConfigRepo struct {
 	Name string `toml:"name" validate:"required"`
 	// URL to clone the repo
 	URL string `toml:"url" validate:"required"`
+	// CommitURL is a text/template for the web URL of a commit, e.g.
+	// "https://gitweb.dragonflybsd.org/dragonfly.git/commit/{{ .Hash }}".
+	// The rendered URL is shortened when [urlshort] is configured.
+	CommitURL string `toml:"commit_url" validate:"required"`
 	// Poll interval in seconds
 	Interval int `toml:"interval" validate:"required,min=1"`
 }
@@ -97,28 +104,49 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Setup context and signal handling
-	ctx, cancel := monitor.SignalContext()
-	defer cancel()
+	var shortener monitor.Shortener
+	if config.URLShort != nil {
+		s, err := monitor.NewURLShortener(config.URLShort)
+		if err != nil {
+			slog.Error("invalid urlshort config", "error", err)
+			os.Exit(1)
+		}
+		shortener = s
+	}
 
 	webhook := monitor.NewWebhook(&config.Webhook)
-	wg := &sync.WaitGroup{}
 
+	monitors := make([]*Monitor, 0, len(config.Repos))
 	for _, repo := range config.Repos {
 		if !repo.Enabled {
 			slog.Info("skip disabled repo", "name", repo.Name, "url", repo.URL)
 			continue
 		}
-		monitor := NewMonitor(&MonitorConfig{
+		m, err := NewMonitor(&MonitorConfig{
 			Name:      repo.Name,
 			RepoURL:   repo.URL,
+			CommitURL: repo.CommitURL,
 			RepoDir:   filepath.Join(config.DataDir, repo.Name+".git"),
 			StatePath: filepath.Join(config.DataDir, repo.Name+".state"),
 			Interval:  time.Duration(repo.Interval) * time.Second,
 			Poster:    webhook,
+			Shortener: shortener,
 		}, nil)
+		if err != nil {
+			slog.Error("invalid monitor config", "repo", repo.Name, "error", err)
+			os.Exit(1)
+		}
+		monitors = append(monitors, m)
+	}
+
+	// Setup context and signal handling
+	ctx, cancel := monitor.SignalContext()
+	defer cancel()
+
+	wg := &sync.WaitGroup{}
+	for _, m := range monitors {
 		wg.Add(1)
-		go monitor.Start(ctx, wg)
+		go m.Start(ctx, wg)
 	}
 
 	wg.Wait()

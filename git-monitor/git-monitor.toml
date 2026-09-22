@@ -17,8 +17,19 @@ from = "git-monitor"
 # Target to announce the messages
 target = "#dragonflybsd"
 
+[urlshort]
+# Base URL of the URL shortener API, including the version prefix.
+# Optional: when omitted, the full commit URL is announced.
+api = "https://example.com/.api/v1"
+# Bearer token to authenticate with the URL shortener API
+token = "???"
+# Total HTTP request timeout in seconds
+timeout = 5
+
 [[repos]]
 enabled = true
 name = "dragonfly"
 url = "git://git.dragonflybsd.org/dragonfly.git"
+# text/template for the web URL of a commit; {{ .Hash }} is the full hash.
+commit_url = "https://gitweb.dragonflybsd.org/dragonfly.git/commit/{{ .Hash }}"
 interval = 60  # seconds
