@@ -29,7 +29,7 @@ code; each item has an ID so reviews and commits can reference it.
 ### Non-goals (v1)
 
 - No web UI, no CLI admin tool, no Prometheus metrics.
-- No batch API.
+- No bulk update/delete API.
 - No wildcard certificates (tls-alpn-01 cannot issue them).
 - No config hot-reload; restart to apply config changes.
 - No server-side fetching/validation of target URLs.
@@ -462,7 +462,12 @@ Link record:
 - **Create(target, rule, keyCandidate)**: in one `Update`, check `targets`,
   then `links` for the candidate (hash extension loop for rules with `hash`),
   then insert both. Re-check `targets` inside the transaction to remain
-  idempotent under concurrency.
+  idempotent under concurrency. Both `Create` and `CreateBatch` take the same
+  `CreateRequest` and share this logic.
+- **CreateBatch(requests) -> results**: process a list of `CreateRequest` in a
+  single `Update` (one commit). Each item is independent: its error is
+  reported in the matching result and the successful items are still
+  committed.
 - **Get(key)**: read `links`.
 - **List(prefix, limit, cursor)**: forward cursor scan of `links` while
   `bytes.HasPrefix`; `cursor` is the last returned key; `limit` capped at 1000.
@@ -756,6 +761,7 @@ authenticated clients are additionally limited per token by `api_rate`/
 | GET | `/status` | admin | status and statistics |
 | GET | `/whoami` | any | caller identity |
 | POST | `/links` | any | resolve or create a key for a target |
+| POST | `/links/batch` | any | resolve or create keys for several targets in one request (§10.5) |
 | GET | `/links?key=` | any | fetch one link |
 | GET | `/links?namespace=&limit=&cursor=` | any | list links by prefix |
 | PUT | `/links` | any | retarget a link |
@@ -880,6 +886,44 @@ Bounded and cheap. Compute link counts on demand (optionally cached 60 s).
   wrapping `GetCertificate` for real handshakes and from the pre-warm return
   value, ignoring challenge handshakes (C17).
 - `last_prewarm_ok`/`last_prewarm_at` track the startup pre-warm (§12).
+
+### 10.5 `POST /links/batch`
+
+Creates or resolves several targets in one request and one bbolt write
+transaction (`Store.CreateBatch`). Items are limited to 100; the body limit
+still applies. `key` is optional and follows the same rules as `POST /links`.
+
+Request:
+
+```json
+{"items": [
+  {"target": "https://github.com/DragonFlyBSD/DragonFlyBSD/pull/56"},
+  {"target": "https://example.com/x", "key": "/optional"}
+]}
+```
+
+Response `200`, one result per request item, in order. `created` is present on
+every result but is meaningful only when `link` is set:
+
+```json
+{"results": [
+  {"target": "https://github.com/DragonFlyBSD/DragonFlyBSD/pull/56",
+   "created": true,
+   "link": {"key": "/gh/dfbsd/p/56",
+            "short_url": "https://example.com/gh/dfbsd/p/56",
+            "target": "https://github.com/DragonFlyBSD/DragonFlyBSD/pull/56",
+            "rule": "github-pr",
+            "created_at": "2026-09-11T05:00:00Z",
+            "updated_at": "2026-09-11T05:00:00Z"}},
+  {"target": "https://bad", "created": false,
+   "error": {"code": "bad_request", "message": "invalid target: ..."}}
+]}
+```
+
+Items are independent: invalid targets, namespace violations, and collisions
+are reported in that item's `error` and do not affect the others; successful
+items are committed in the same transaction. An empty or oversized `items`
+list returns `400`; a failed commit returns `500`.
 
 ---
 
@@ -1032,8 +1076,8 @@ that the operator owns renewal.
 ```
 
 - `type` is `redirect`, `api`, `acme`, or `home`.
-- API records include `client` and `action` (`create`, `update`, `delete`,
-  `resolve`, `status`); request bodies are never logged.
+- API records include `client` and `action` (`create`, `batch_create`,
+  `update`, `delete`, `resolve`, `status`); request bodies are never logged.
 - `remote_ip` is the trusted-proxy-aware client IP (C13, C25).
 - `type=acme` covers port-80 http-01 requests when fallback is enabled;
   tls-alpn-01 handshakes are not visible to HTTP handlers and are logged by the
@@ -1200,7 +1244,6 @@ urlshort/
 
 ## 19. Deferred and future work
 
-- `POST /links/batch` for messages with several URLs.
 - Optional per-rule or global target-host allowlist.
 - Prometheus metrics; richer status counters.
 - Small CLI admin tool.

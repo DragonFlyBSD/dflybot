@@ -37,6 +37,24 @@ type Link struct {
 // key for which isFree returned false.
 type KeyFunc func(isFree func(key string) (bool, error)) (string, error)
 
+// CreateRequest describes one link creation. It is shared by Create and
+// CreateBatch.
+type CreateRequest struct {
+	Target      string
+	Rule        string
+	Owner       string
+	ExplicitKey string
+	Gen         KeyFunc
+}
+
+// CreateResult is the outcome of one CreateRequest in a batch. Err is non-nil
+// when that item failed; other items in the same batch are unaffected.
+type CreateResult struct {
+	Link    *Link
+	Created bool
+	Err     error
+}
+
 // StoreStats is a snapshot of storage statistics for the status endpoint.
 type StoreStats struct {
 	FileSizeBytes int64 `json:"file_size_bytes"`
@@ -53,10 +71,14 @@ type Store interface {
 	Resolve(target string) (string, error)
 	// Get returns the link stored under key, or ErrNotFound.
 	Get(key string) (*Link, error)
-	// Create maps target to a key and returns the link and whether it was
-	// created. When explicitKey is non-empty it is used as-is; otherwise gen is
-	// called to choose a key. Returns ErrConflict on any collision.
-	Create(target, rule, owner, explicitKey string, gen KeyFunc) (*Link, bool, error)
+	// Create maps req.Target to a key and returns the link and whether it was
+	// created. When req.ExplicitKey is non-empty it is used as-is; otherwise
+	// req.Gen is called to choose a key. Returns ErrConflict on any collision.
+	Create(req CreateRequest) (*Link, bool, error)
+	// CreateBatch applies reqs in a single write transaction and returns one
+	// result per request, in order. A per-item error does not abort the others;
+	// only a transaction-level failure is returned.
+	CreateBatch(reqs []CreateRequest) ([]CreateResult, error)
 	// Update retargets an existing key.
 	Update(key, target string) (*Link, error)
 	// Delete removes a link.

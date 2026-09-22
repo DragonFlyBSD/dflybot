@@ -30,7 +30,7 @@ func newBenchStore(b *testing.B) *BoltStore {
 		b.Fatal(err)
 	}
 	b.Cleanup(func() { s.Close() })
-	if _, _, err := s.Create(benchTarget, "github-pr", "bench", "/gh/dfbsd/p/12345", nil); err != nil {
+	if _, _, err := s.Create(CreateRequest{Target: benchTarget, Rule: "github-pr", Owner: "bench", ExplicitKey: "/gh/dfbsd/p/12345"}); err != nil {
 		b.Fatal(err)
 	}
 	return s

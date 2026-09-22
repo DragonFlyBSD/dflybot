@@ -119,76 +119,102 @@ func (s *BoltStore) Get(key string) (*Link, error) {
 	return link, err
 }
 
-func (s *BoltStore) Create(target, rule, owner, explicitKey string, gen KeyFunc) (*Link, bool, error) {
-	var out *Link
-	created := false
+func (s *BoltStore) Create(req CreateRequest) (*Link, bool, error) {
+	var (
+		out     *Link
+		created bool
+	)
 	err := s.db.Update(func(tx *bolt.Tx) error {
-		links := tx.Bucket([]byte(bucketLinks))
-		targets := tx.Bucket([]byte(bucketTargets))
+		var err error
+		out, created, err = s.createInTx(tx, req)
+		return err
+	})
+	return out, created, err
+}
 
-		if k := targets.Get([]byte(target)); k != nil {
-			if explicitKey != "" && explicitKey != string(k) {
-				return fmt.Errorf("%w: target already mapped to key %q",
-					ErrConflict, string(k))
-			}
-			raw := links.Get(k)
-			if raw == nil {
-				return fmt.Errorf("inconsistent database: target %q has no link", target)
-			}
-			var l Link
-			if err := json.Unmarshal(raw, &l); err != nil {
-				return err
-			}
-			l.Key = string(k)
-			out, created = &l, false
-			return nil
+// CreateBatch applies reqs in one write transaction, so a batch costs a single
+// commit. Per-item errors are captured in the results; only a transaction-level
+// failure is returned.
+func (s *BoltStore) CreateBatch(reqs []CreateRequest) ([]CreateResult, error) {
+	if len(reqs) == 0 {
+		return nil, nil
+	}
+	results := make([]CreateResult, len(reqs))
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		for i := range reqs {
+			link, created, err := s.createInTx(tx, reqs[i])
+			results[i] = CreateResult{Link: link, Created: created, Err: err}
 		}
-
-		var key string
-		if explicitKey != "" {
-			if links.Get([]byte(explicitKey)) != nil {
-				return fmt.Errorf("%w: key %q already exists", ErrConflict, explicitKey)
-			}
-			key = explicitKey
-		} else {
-			if gen == nil {
-				return fmt.Errorf("no key generator for target %q", target)
-			}
-			k, err := gen(func(candidate string) (bool, error) {
-				return links.Get([]byte(candidate)) == nil, nil
-			})
-			if err != nil {
-				return err
-			}
-			if k == "" {
-				return fmt.Errorf("key generator returned an empty key")
-			}
-			if links.Get([]byte(k)) != nil {
-				return fmt.Errorf("%w: generated key %q already exists", ErrConflict, k)
-			}
-			key = k
-		}
-
-		now := s.now()
-		l := &Link{Target: target, Rule: rule, Owner: owner, CreatedAt: now, UpdatedAt: now}
-		raw, err := json.Marshal(l)
-		if err != nil {
-			return err
-		}
-		if err := links.Put([]byte(key), raw); err != nil {
-			return err
-		}
-		if err := targets.Put([]byte(target), []byte(key)); err != nil {
-			return err
-		}
-		l.Key = key
-		out, created = l, true
 		return nil
 	})
 	if err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// createInTx is the create logic shared by Create and CreateBatch. It runs
+// inside a caller-owned write transaction and does not commit.
+func (s *BoltStore) createInTx(tx *bolt.Tx, req CreateRequest) (*Link, bool, error) {
+	links := tx.Bucket([]byte(bucketLinks))
+	targets := tx.Bucket([]byte(bucketTargets))
+
+	if k := targets.Get([]byte(req.Target)); k != nil {
+		if req.ExplicitKey != "" && req.ExplicitKey != string(k) {
+			return nil, false, fmt.Errorf("%w: target already mapped to key %q",
+				ErrConflict, string(k))
+		}
+		raw := links.Get(k)
+		if raw == nil {
+			return nil, false, fmt.Errorf("inconsistent database: target %q has no link", req.Target)
+		}
+		var l Link
+		if err := json.Unmarshal(raw, &l); err != nil {
+			return nil, false, fmt.Errorf("invalid link in database: %w", err)
+		}
+		l.Key = string(k)
+		return &l, false, nil
+	}
+
+	var key string
+	if req.ExplicitKey != "" {
+		if links.Get([]byte(req.ExplicitKey)) != nil {
+			return nil, false, fmt.Errorf("%w: key %q already exists", ErrConflict, req.ExplicitKey)
+		}
+		key = req.ExplicitKey
+	} else {
+		if req.Gen == nil {
+			return nil, false, fmt.Errorf("no key generator for target %q", req.Target)
+		}
+		k, err := req.Gen(func(candidate string) (bool, error) {
+			return links.Get([]byte(candidate)) == nil, nil
+		})
+		if err != nil {
+			return nil, false, err
+		}
+		if k == "" {
+			return nil, false, fmt.Errorf("key generator returned an empty key")
+		}
+		if links.Get([]byte(k)) != nil {
+			return nil, false, fmt.Errorf("%w: generated key %q already exists", ErrConflict, k)
+		}
+		key = k
+	}
+
+	now := s.now()
+	l := &Link{Target: req.Target, Rule: req.Rule, Owner: req.Owner, CreatedAt: now, UpdatedAt: now}
+	raw, err := json.Marshal(l)
+	if err != nil {
 		return nil, false, err
 	}
-	return out, created, nil
+	if err := links.Put([]byte(key), raw); err != nil {
+		return nil, false, err
+	}
+	if err := targets.Put([]byte(req.Target), []byte(key)); err != nil {
+		return nil, false, err
+	}
+	l.Key = key
+	return l, true, nil
 }
 
 func (s *BoltStore) Update(key, target string) (*Link, error) {

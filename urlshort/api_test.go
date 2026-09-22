@@ -134,6 +134,104 @@ func TestAPIHealthAndAuth(t *testing.T) {
 	}
 }
 
+func TestAPICreateBatch(t *testing.T) {
+	e := newTestEnv(t)
+	pull56 := "https://github.com/DragonFlyBSD/DragonFlyBSD/pull/56"
+	pull57 := "https://github.com/DragonFlyBSD/DragonFlyBSD/pull/57"
+
+	body := map[string]any{
+		"items": []map[string]string{
+			{"target": pull56},
+			{"target": pull57},
+			{"target": "not-a-url"},
+			{"target": pull56}, // already created above
+		},
+	}
+	rec := e.request(http.MethodPost, apiPathLinksBatch, testAdminToken, body, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Results []struct {
+			Target  string          `json:"target"`
+			Created bool            `json:"created"`
+			Link    *linkView       `json:"link"`
+			Error   *apiErrorDetail `json:"error"`
+		} `json:"results"`
+	}
+	decodeBody(t, rec, &resp)
+	if len(resp.Results) != 4 {
+		t.Fatalf("results = %d, want 4", len(resp.Results))
+	}
+	if r := resp.Results[0]; r.Error != nil || r.Link == nil || !r.Created || r.Link.Key != "/gh/dfbsd/p/56" {
+		t.Errorf("result[0] = %+v", r)
+	}
+	if r := resp.Results[1]; r.Error != nil || r.Link == nil || !r.Created || r.Link.Key != "/gh/dfbsd/p/57" {
+		t.Errorf("result[1] = %+v", r)
+	}
+	if r := resp.Results[2]; r.Error == nil || r.Error.Code != "bad_request" {
+		t.Errorf("result[2] = %+v", r)
+	}
+	if r := resp.Results[3]; r.Error != nil || r.Link == nil || r.Created || r.Link.Key != "/gh/dfbsd/p/56" {
+		t.Errorf("result[3] = %+v", r)
+	}
+
+	for _, key := range []string{"/gh/dfbsd/p/56", "/gh/dfbsd/p/57"} {
+		if rec := e.request(http.MethodGet, apiPathLinks+"?key="+key, testAdminToken, nil, nil); rec.Code != http.StatusOK {
+			t.Errorf("get %s = %d", key, rec.Code)
+		}
+	}
+}
+
+func TestAPICreateBatchForbiddenItem(t *testing.T) {
+	e := newTestEnv(t)
+	// The git client may only use /g/; a github PR renders a /gh/ key.
+	body := map[string]any{
+		"items": []map[string]string{
+			{"target": "https://github.com/DragonFlyBSD/DragonFlyBSD/pull/56"},
+			{"target": "https://gitweb.dragonflybsd.org/dragonfly.git/commitdiff/0123456789abcdef0123456789abcdef01234567"},
+		},
+	}
+	rec := e.request(http.MethodPost, apiPathLinksBatch, testGitToken, body, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Results []struct {
+			Created bool            `json:"created"`
+			Link    *linkView       `json:"link"`
+			Error   *apiErrorDetail `json:"error"`
+		} `json:"results"`
+	}
+	decodeBody(t, rec, &resp)
+	if len(resp.Results) != 2 {
+		t.Fatalf("results = %d, want 2", len(resp.Results))
+	}
+	if r := resp.Results[0]; r.Error == nil || r.Error.Code != "forbidden" {
+		t.Errorf("result[0] = %+v", r)
+	}
+	if r := resp.Results[1]; r.Error != nil || r.Link == nil || !r.Created {
+		t.Errorf("result[1] = %+v", r)
+	}
+}
+
+func TestAPICreateBatchLimits(t *testing.T) {
+	e := newTestEnv(t)
+	if rec := e.request(http.MethodPost, apiPathLinksBatch, testAdminToken, map[string]any{"items": []any{}}, nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty items = %d, want 400", rec.Code)
+	}
+	items := make([]map[string]string, maxBatchCreate+1)
+	for i := range items {
+		items[i] = map[string]string{"target": "https://example.com/x"}
+	}
+	if rec := e.request(http.MethodPost, apiPathLinksBatch, testAdminToken, map[string]any{"items": items}, nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("too many items = %d, want 400", rec.Code)
+	}
+	if rec := e.request(http.MethodGet, apiPathLinksBatch, testAdminToken, nil, nil); rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET batch = %d, want 405", rec.Code)
+	}
+}
+
 func TestAPICreateRuleAndIdempotent(t *testing.T) {
 	e := newTestEnv(t)
 	target := "https://github.com/DragonFlyBSD/DragonFlyBSD/pull/56"

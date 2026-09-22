@@ -51,7 +51,7 @@ func newTestMaintenance(t *testing.T, store Store, now func() time.Time) *Mainte
 func TestMaintenanceBackup(t *testing.T) {
 	store := newTestStore(t)
 	for i := 0; i < 200; i++ {
-		if _, _, err := store.Create("https://x/"+string(rune('a'+i%26))+string(rune('0'+i/26)), "", "", "/g/"+string(rune('a'+i%26))+string(rune('0'+i/26)), nil); err != nil {
+		if _, _, err := store.Create(CreateRequest{Target: "https://x/" + string(rune('a'+i%26)) + string(rune('0'+i/26)), ExplicitKey: "/g/" + string(rune('a'+i%26)) + string(rune('0'+i/26))}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -106,7 +106,7 @@ func TestMaintenanceStartupNames(t *testing.T) {
 
 func TestMaintenanceStartupRetentionCount(t *testing.T) {
 	store := newTestStore(t)
-	if _, _, err := store.Create("https://x/1", "", "", "/g/1", nil); err != nil {
+	if _, _, err := store.Create(CreateRequest{Target: "https://x/1", ExplicitKey: "/g/1"}); err != nil {
 		t.Fatal(err)
 	}
 	clock := newMaintClock(time.Date(2026, 9, 11, 3, 0, 0, 0, time.UTC))
@@ -185,7 +185,7 @@ func TestMaintenanceRetentionDays(t *testing.T) {
 
 func TestMaintenanceFailureLeavesLiveDB(t *testing.T) {
 	store := newTestStore(t)
-	if _, _, err := store.Create("https://x/1", "", "", "/g/1", nil); err != nil {
+	if _, _, err := store.Create(CreateRequest{Target: "https://x/1", ExplicitKey: "/g/1"}); err != nil {
 		t.Fatal(err)
 	}
 	clock := newMaintClock(time.Date(2026, 9, 11, 3, 0, 0, 0, time.UTC))

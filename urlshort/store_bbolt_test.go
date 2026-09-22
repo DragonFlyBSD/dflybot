@@ -30,7 +30,7 @@ func newTestStore(t *testing.T) *BoltStore {
 func TestStoreCRUD(t *testing.T) {
 	s := newTestStore(t)
 
-	link, created, err := s.Create("https://example.com/a", "rule-a", "owner", "/a/1", nil)
+	link, created, err := s.Create(CreateRequest{Target: "https://example.com/a", Rule: "rule-a", Owner: "owner", ExplicitKey: "/a/1"})
 	if err != nil || !created {
 		t.Fatalf("Create: created=%v err=%v", created, err)
 	}
@@ -48,7 +48,7 @@ func TestStoreCRUD(t *testing.T) {
 	}
 
 	// Idempotent create returns the existing link.
-	again, created2, err := s.Create("https://example.com/a", "rule-a", "owner", "/a/1", nil)
+	again, created2, err := s.Create(CreateRequest{Target: "https://example.com/a", Rule: "rule-a", Owner: "owner", ExplicitKey: "/a/1"})
 	if err != nil || created2 || again.Target != link.Target {
 		t.Fatalf("idempotent Create: %+v created=%v err=%v", again, created2, err)
 	}
@@ -86,7 +86,7 @@ func TestStoreUpdateIdempotent(t *testing.T) {
 		return base.Add(time.Duration(calls) * time.Second)
 	}
 
-	link, _, err := s.Create("https://example.com/a", "", "", "/a/1", nil)
+	link, _, err := s.Create(CreateRequest{Target: "https://example.com/a", ExplicitKey: "/a/1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,21 +122,61 @@ func TestStoreUpdateIdempotent(t *testing.T) {
 	}
 }
 
+func TestStoreCreateBatch(t *testing.T) {
+	s := newTestStore(t)
+	reqs := []CreateRequest{
+		{Target: "https://example.com/a", Rule: "r", Owner: "o", ExplicitKey: "/a/1"},
+		{Target: "https://example.com/b", Rule: "r", Owner: "o", ExplicitKey: "/a/1"},
+		{Target: "https://example.com/c", Rule: "r", Owner: "o", Gen: func(func(string) (bool, error)) (string, error) {
+			return "/a/3", nil
+		}},
+		{Target: "https://example.com/a", Rule: "r", Owner: "o"},
+	}
+	res, err := s.CreateBatch(reqs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 4 {
+		t.Fatalf("results = %d, want 4", len(res))
+	}
+	if res[0].Err != nil || !res[0].Created || res[0].Link.Key != "/a/1" {
+		t.Errorf("res[0] = %+v", res[0])
+	}
+	if !errors.Is(res[1].Err, ErrConflict) || res[1].Link != nil {
+		t.Errorf("res[1] = %+v", res[1])
+	}
+	if res[2].Err != nil || !res[2].Created || res[2].Link.Key != "/a/3" {
+		t.Errorf("res[2] = %+v", res[2])
+	}
+	if res[3].Err != nil || res[3].Created || res[3].Link.Key != "/a/1" {
+		t.Errorf("res[3] = %+v", res[3])
+	}
+	// Successful items were committed despite the failed one.
+	for _, key := range []string{"/a/1", "/a/3"} {
+		if _, err := s.Get(key); err != nil {
+			t.Errorf("Get(%s): %v", key, err)
+		}
+	}
+	if _, err := s.Resolve("https://example.com/b"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("target b should not resolve: %v", err)
+	}
+}
+
 func TestStoreConflict(t *testing.T) {
 	s := newTestStore(t)
-	if _, _, err := s.Create("https://example.com/a", "", "", "/a/1", nil); err != nil {
+	if _, _, err := s.Create(CreateRequest{Target: "https://example.com/a", ExplicitKey: "/a/1"}); err != nil {
 		t.Fatal(err)
 	}
 	// Same key, different target.
-	if _, _, err := s.Create("https://example.com/b", "", "", "/a/1", nil); !errors.Is(err, ErrConflict) {
+	if _, _, err := s.Create(CreateRequest{Target: "https://example.com/b", ExplicitKey: "/a/1"}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected conflict, got %v", err)
 	}
 	// Same target, different explicit key.
-	if _, _, err := s.Create("https://example.com/a", "", "", "/a/2", nil); !errors.Is(err, ErrConflict) {
+	if _, _, err := s.Create(CreateRequest{Target: "https://example.com/a", ExplicitKey: "/a/2"}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected conflict, got %v", err)
 	}
 	// Update to an occupied target.
-	if _, _, err := s.Create("https://example.com/c", "", "", "/a/3", nil); err != nil {
+	if _, _, err := s.Create(CreateRequest{Target: "https://example.com/c", ExplicitKey: "/a/3"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Update("/a/3", "https://example.com/a"); !errors.Is(err, ErrConflict) {
@@ -147,7 +187,7 @@ func TestStoreConflict(t *testing.T) {
 func TestStoreGenerateWithExtension(t *testing.T) {
 	s := newTestStore(t)
 	// Occupy /g/d/728aaaa.
-	if _, _, err := s.Create("https://x/1", "", "", "/g/d/728aaaa", nil); err != nil {
+	if _, _, err := s.Create(CreateRequest{Target: "https://x/1", ExplicitKey: "/g/d/728aaaa"}); err != nil {
 		t.Fatal(err)
 	}
 	// Generator extends the hash until free.
@@ -165,7 +205,7 @@ func TestStoreGenerateWithExtension(t *testing.T) {
 		}
 		return "", fmt.Errorf("%w: no unique hash prefix", ErrConflict)
 	}
-	link, created, err := s.Create("https://x/2", "r", "", "", gen)
+	link, created, err := s.Create(CreateRequest{Target: "https://x/2", Rule: "r", Gen: gen})
 	if err != nil || !created {
 		t.Fatalf("Create: %+v created=%v err=%v", link, created, err)
 	}
@@ -188,7 +228,7 @@ func TestStoreConcurrentCreate(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			l, c, err := s.Create("https://same/target", "r", "o", "/s/1", nil)
+			l, c, err := s.Create(CreateRequest{Target: "https://same/target", Rule: "r", Owner: "o", ExplicitKey: "/s/1"})
 			if l != nil {
 				keys[i] = l.Target
 			}
@@ -219,12 +259,12 @@ func TestStoreListPagination(t *testing.T) {
 	total := 25
 	for i := 0; i < total; i++ {
 		key := fmt.Sprintf("/g/x/%02d", i)
-		if _, _, err := s.Create(fmt.Sprintf("https://x/%d", i), "", "", key, nil); err != nil {
+		if _, _, err := s.Create(CreateRequest{Target: fmt.Sprintf("https://x/%d", i), ExplicitKey: key}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// Unrelated prefix.
-	if _, _, err := s.Create("https://y/1", "", "", "/other/1", nil); err != nil {
+	if _, _, err := s.Create(CreateRequest{Target: "https://y/1", ExplicitKey: "/other/1"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -275,7 +315,7 @@ func TestStoreListPagination(t *testing.T) {
 func TestStoreCompactTo(t *testing.T) {
 	s := newTestStore(t)
 	for i := 0; i < 200; i++ {
-		if _, _, err := s.Create(fmt.Sprintf("https://x/%d", i), "", "", fmt.Sprintf("/g/%d", i), nil); err != nil {
+		if _, _, err := s.Create(CreateRequest{Target: fmt.Sprintf("https://x/%d", i), ExplicitKey: fmt.Sprintf("/g/%d", i)}); err != nil {
 			t.Fatal(err)
 		}
 	}

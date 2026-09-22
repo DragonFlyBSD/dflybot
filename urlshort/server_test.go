@@ -36,7 +36,7 @@ func TestHostValidation(t *testing.T) {
 
 func TestRedirect(t *testing.T) {
 	e := newTestEnv(t)
-	if _, _, err := e.store.Create("https://target.example/page", "", "admin", "/g/t", nil); err != nil {
+	if _, _, err := e.store.Create(CreateRequest{Target: "https://target.example/page", Owner: "admin", ExplicitKey: "/g/t"}); err != nil {
 		t.Fatal(err)
 	}
 

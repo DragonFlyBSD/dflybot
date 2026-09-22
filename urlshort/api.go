@@ -35,6 +35,8 @@ const (
 	apiPathStatus = apiBase + "/status"
 	apiPathWhoami = apiBase + "/whoami"
 	apiPathLinks  = apiBase + "/links"
+
+	apiPathLinksBatch = apiPathLinks + "/batch"
 )
 
 // isAPIPath reports whether p targets the API tree, including apiBase itself
@@ -76,6 +78,7 @@ func init() {
 		{[]string{http.MethodGet}, apiPathWhoami, authAny, (*Server).handleWhoami},
 		{[]string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete},
 			apiPathLinks, authAny, (*Server).handleLinks},
+		{[]string{http.MethodPost}, apiPathLinksBatch, authAny, (*Server).handleLinksBatch},
 	}
 }
 
@@ -320,20 +323,36 @@ func (s *Server) linkView(l *Link) linkView {
 	}
 }
 
-func (s *Server) storeError(w http.ResponseWriter, err error, context string) {
+// apiError is an API error with its HTTP status.
+type apiError struct {
+	status  int
+	code    string
+	message string
+}
+
+// apiErrorFromStore maps a store error to an API error. Server-side failures
+// are logged and recorded in the status state.
+func (s *Server) apiErrorFromStore(err error, context string) *apiError {
 	switch {
 	case errors.Is(err, ErrForbidden):
-		writeAPIError(w, http.StatusForbidden, "forbidden",
-			"key is outside the caller's namespaces")
+		return &apiError{http.StatusForbidden, "forbidden",
+			"key is outside the caller's namespaces"}
 	case errors.Is(err, ErrConflict):
 		// Operator-actionable: hash exhaustion or a cross-rule collision (7.4).
 		s.logger.Warn("link conflict", "error", err)
-		writeAPIError(w, http.StatusConflict, "conflict", err.Error())
+		return &apiError{http.StatusConflict, "conflict", err.Error()}
 	case errors.Is(err, ErrNotFound):
-		writeAPIError(w, http.StatusNotFound, "not_found", "link not found")
+		return &apiError{http.StatusNotFound, "not_found", "link not found"}
 	default:
-		s.writeInternalError(w, err, context)
+		s.logger.Error(context, "error", err)
+		s.status.SetError(err)
+		return &apiError{http.StatusInternalServerError, "internal", "internal server error"}
 	}
+}
+
+func (s *Server) storeError(w http.ResponseWriter, err error, context string) {
+	ae := s.apiErrorFromStore(err, context)
+	writeAPIError(w, ae.status, ae.code, ae.message)
 }
 
 func (s *Server) getLink(w http.ResponseWriter, r *http.Request, c *Client) {
@@ -443,6 +462,85 @@ func (s *Server) listFiltered(c *Client, limit int, cursor string) ([]*Link, str
 	return out, next, nil
 }
 
+// preparedCreate is the outcome of validating one create request without
+// touching the store: a request for the store, or an already-published link,
+// or an API error.
+type preparedCreate struct {
+	req      CreateRequest
+	existing *Link
+	err      *apiError
+}
+
+// prepareCreate canonicalizes the target and decides how its key is chosen.
+func (s *Server) prepareCreate(c *Client, rawTarget, explicitKey string) preparedCreate {
+	target, err := canonicalizeTarget(rawTarget)
+	if err != nil {
+		return preparedCreate{err: &apiError{http.StatusBadRequest, "bad_request",
+			"invalid target: " + err.Error()}}
+	}
+
+	if explicitKey != "" {
+		if err := ValidateKey(explicitKey); err != nil {
+			return preparedCreate{err: &apiError{http.StatusBadRequest, "bad_request",
+				"invalid key: " + err.Error()}}
+		}
+		if !c.CanAccess(explicitKey) {
+			return preparedCreate{err: &apiError{http.StatusForbidden, "forbidden",
+				"key is outside the caller's namespaces"}}
+		}
+		return preparedCreate{req: CreateRequest{
+			Target: target, Owner: c.Name, ExplicitKey: explicitKey,
+		}}
+	}
+
+	// A target that already has a key returns it, even when the key is outside
+	// the caller's namespace: it is already published.
+	if key, err := s.store.Resolve(target); err == nil {
+		if link, err := s.store.Get(key); err == nil {
+			return preparedCreate{existing: link}
+		}
+	}
+
+	req := CreateRequest{Target: target, Owner: c.Name}
+	rule, vars, matched := s.rules.Match(target)
+	if !matched {
+		ns := c.FirstNamespace()
+		if ns == "" {
+			return preparedCreate{err: &apiError{http.StatusBadRequest, "bad_request",
+				"no namespace available"}}
+		}
+		req.Gen = func(isFree func(string) (bool, error)) (string, error) {
+			return GenerateRandomKey(ns, isFree)
+		}
+		return preparedCreate{req: req}
+	}
+
+	req.Rule = rule.Name
+	// Render a key to validate the namespace before the store is touched.
+	full, err := rule.Render(vars)
+	if err != nil {
+		s.logger.Error("rule render failed", "error", err)
+		s.status.SetError(err)
+		return preparedCreate{err: &apiError{http.StatusInternalServerError, "internal",
+			"internal server error"}}
+	}
+	if !c.CanAccess(full) {
+		return preparedCreate{err: &apiError{http.StatusForbidden, "forbidden",
+			"rule key is outside the caller's namespaces"}}
+	}
+	req.Gen = func(isFree func(string) (bool, error)) (string, error) {
+		key, err := rule.GenerateKey(vars, isFree)
+		if err != nil {
+			return "", err
+		}
+		if !c.CanAccess(key) {
+			return "", ErrForbidden
+		}
+		return key, nil
+	}
+	return preparedCreate{req: req}
+}
+
 func (s *Server) createLink(w http.ResponseWriter, r *http.Request, c *Client) {
 	var req struct {
 		Target string `json:"target"`
@@ -451,85 +549,16 @@ func (s *Server) createLink(w http.ResponseWriter, r *http.Request, c *Client) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	target, err := canonicalizeTarget(req.Target)
-	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "bad_request",
-			"invalid target: "+err.Error())
+	p := s.prepareCreate(c, req.Target, req.Key)
+	if p.err != nil {
+		writeAPIError(w, p.err.status, p.err.code, p.err.message)
 		return
 	}
-
-	if req.Key == "" {
-		// A target that already has a key returns it, even when the key is
-		// outside the caller's namespace: it is already published.
-		if key, err := s.store.Resolve(target); err == nil {
-			if link, err := s.store.Get(key); err == nil {
-				s.finishCreate(w, r, link, false)
-				return
-			}
-		}
-	}
-
-	if req.Key != "" {
-		if err := ValidateKey(req.Key); err != nil {
-			writeAPIError(w, http.StatusBadRequest, "bad_request",
-				"invalid key: "+err.Error())
-			return
-		}
-		if !c.CanAccess(req.Key) {
-			writeAPIError(w, http.StatusForbidden, "forbidden",
-				"key is outside the caller's namespaces")
-			return
-		}
-		link, created, err := s.store.Create(target, "", c.Name, req.Key, nil)
-		if err != nil {
-			s.storeError(w, err, "Create link failed")
-			return
-		}
-		s.finishCreate(w, r, link, created)
+	if p.existing != nil {
+		s.finishCreate(w, r, p.existing, false)
 		return
 	}
-
-	rule, vars, matched := s.rules.Match(target)
-	var (
-		gen      KeyFunc
-		ruleName string
-	)
-	if matched {
-		ruleName = rule.Name
-		// Render a key to validate the namespace.
-		full, err := rule.Render(vars)
-		if err != nil {
-			s.writeInternalError(w, err, "rule render failed")
-			return
-		}
-		if !c.CanAccess(full) {
-			writeAPIError(w, http.StatusForbidden, "forbidden",
-				"rule key is outside the caller's namespaces")
-			return
-		}
-		gen = func(isFree func(string) (bool, error)) (string, error) {
-			key, err := rule.GenerateKey(vars, isFree)
-			if err != nil {
-				return "", err
-			}
-			if !c.CanAccess(key) {
-				return "", ErrForbidden
-			}
-			return key, nil
-		}
-	} else {
-		ns := c.FirstNamespace()
-		if ns == "" {
-			writeAPIError(w, http.StatusBadRequest, "bad_request",
-				"no namespace available")
-			return
-		}
-		gen = func(isFree func(string) (bool, error)) (string, error) {
-			return GenerateRandomKey(ns, isFree)
-		}
-	}
-
-	link, created, err := s.store.Create(target, ruleName, c.Name, "", gen)
+	link, created, err := s.store.Create(p.req)
 	if err != nil {
 		s.storeError(w, err, "Create link failed")
 		return
@@ -552,6 +581,85 @@ func (s *Server) finishCreate(w http.ResponseWriter, r *http.Request, link *Link
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, createResponse{linkView: s.linkView(link), Created: created})
+}
+
+// maxBatchCreate bounds the number of items in one batch request.
+const maxBatchCreate = 100
+
+// batchCreateResult is one item of a batch response. Exactly one of Link and
+// Error is set. Results are in request order.
+type batchCreateResult struct {
+	Target  string          `json:"target"`
+	Created bool            `json:"created"`
+	Link    *linkView       `json:"link,omitempty"`
+	Error   *apiErrorDetail `json:"error,omitempty"`
+}
+
+// handleLinksBatch creates or resolves several targets in one request and one
+// write transaction. Each item is independent: a failure is reported in that
+// item's result and does not affect the others.
+func (s *Server) handleLinksBatch(w http.ResponseWriter, r *http.Request, c *Client) {
+	var req struct {
+		Items []struct {
+			Target string `json:"target"`
+			Key    string `json:"key"`
+		} `json:"items"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if len(req.Items) == 0 {
+		writeAPIError(w, http.StatusBadRequest, "bad_request", "items must not be empty")
+		return
+	}
+	if len(req.Items) > maxBatchCreate {
+		writeAPIError(w, http.StatusBadRequest, "bad_request",
+			fmt.Sprintf("too many items (max %d)", maxBatchCreate))
+		return
+	}
+
+	results := make([]batchCreateResult, len(req.Items))
+	reqs := make([]CreateRequest, 0, len(req.Items))
+	indexes := make([]int, 0, len(req.Items))
+	for i, item := range req.Items {
+		results[i].Target = item.Target
+		p := s.prepareCreate(c, item.Target, item.Key)
+		switch {
+		case p.err != nil:
+			results[i].Error = &apiErrorDetail{Code: p.err.code, Message: p.err.message}
+		case p.existing != nil:
+			v := s.linkView(p.existing)
+			results[i].Link = &v
+		default:
+			reqs = append(reqs, p.req)
+			indexes = append(indexes, i)
+		}
+	}
+
+	if len(reqs) > 0 {
+		stored, err := s.store.CreateBatch(reqs)
+		if err != nil {
+			s.writeInternalError(w, err, "Create batch failed")
+			return
+		}
+		for j, res := range stored {
+			i := indexes[j]
+			if res.Err != nil {
+				ae := s.apiErrorFromStore(res.Err, "Create batch item failed")
+				results[i].Error = &apiErrorDetail{Code: ae.code, Message: ae.message}
+				continue
+			}
+			v := s.linkView(res.Link)
+			results[i].Link = &v
+			results[i].Created = res.Created
+		}
+	}
+
+	ai := accessInfoFrom(r)
+	ai.Action = "batch_create"
+	writeJSON(w, http.StatusOK, struct {
+		Results []batchCreateResult `json:"results"`
+	}{results})
 }
 
 // canonicalizeTarget parses and canonicalizes a target URL. It lowercases the
