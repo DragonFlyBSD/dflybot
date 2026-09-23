@@ -116,3 +116,65 @@ func TestURLShortenerMissingShortURL(t *testing.T) {
 		t.Fatal("expected error for missing short_url")
 	}
 }
+
+func TestURLShortenerShortenBatch(t *testing.T) {
+	var gotPath, gotAuth string
+	var gotItems []shortBatchItem
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		var req shortBatchRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		gotItems = req.Items
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{
+			"results": []map[string]any{
+				{"target": req.Items[0].Target, "created": true,
+					"link": map[string]string{"short_url": "https://s.example/a"}},
+				{"target": req.Items[1].Target,
+					"error": map[string]string{"code": "bad_request", "message": "invalid"}},
+				{"target": req.Items[2].Target, "created": true,
+					"link": map[string]string{"short_url": "https://s.example/c"}},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	s, err := NewURLShortener(&ConfigURLShort{API: srv.URL + "/.api/v1", Token: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := []string{"https://example.com/1", "https://example.com/2", "https://example.com/3"}
+	short, err := s.ShortenBatch(context.Background(), targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/.api/v1/links/batch" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if gotAuth != "Bearer secret" {
+		t.Errorf("auth = %q", gotAuth)
+	}
+	if len(gotItems) != 3 || gotItems[0].Target != targets[0] {
+		t.Errorf("items = %+v", gotItems)
+	}
+	if len(short) != 2 || short[targets[0]] != "https://s.example/a" || short[targets[2]] != "https://s.example/c" {
+		t.Errorf("short = %v", short)
+	}
+	if _, ok := short[targets[1]]; ok {
+		t.Errorf("failed target should be absent: %v", short)
+	}
+}
+
+func TestURLShortenerShortenBatchEmpty(t *testing.T) {
+	s, err := NewURLShortener(&ConfigURLShort{API: "https://example.com", Token: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	short, err := s.ShortenBatch(context.Background(), nil)
+	if err != nil || len(short) != 0 {
+		t.Fatalf("empty batch = %v, %v", short, err)
+	}
+}
