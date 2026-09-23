@@ -3,7 +3,7 @@ log_level = "info"
 
 # Storage root.
 # Contains: links.db, acme/, backup/, logs/access-YYYY-MM-DD.jsonl
-data_dir = "./data/"
+data_dir = "./data/urlshort"
 
 [server]
 # Listen addresses (IP literals or hostnames). IPv4 and IPv6 are bound as
@@ -79,7 +79,7 @@ cache_dir = ""
 renew_before_days = 30
 
 # Also allow the http-01 challenge as a fallback. Requires http_port == 80.
-http01_fallback = false
+http01_fallback = true
 
 # Timeout for each ACME HTTP request (not the whole issuance order).
 issue_timeout = 60
@@ -103,7 +103,7 @@ flush_interval = 5      # in seconds
 [backup]
 # Daily compacted backup of links.db.
 enabled = true
-# Default: <data_dir>/backup/. Must end with "/".
+# Default: <data_dir>/backup/.
 dir = ""
 # UTC hour [0,23] at which the daily job runs.
 hour_utc = 3
@@ -121,27 +121,28 @@ compact_tx_max_bytes = 1048576
 # Short-name substitutions usable as {{ abbrev .group }} in rule templates.
 # Unknown names are lowercased and passed through unchanged.
 [abbreviations]
-DragonFlyBSD = "dfbsd"
-DeltaPorts   = "dp"
 dragonfly    = "d"
+DragonFlyBSD = "d"
+DeltaPorts   = "dp"
+DPorts       = "p"
 
 # Ordered mapping rules. First full-string match wins.
-[[rules]]
-name  = "github-pr"
-match = '''^https://github\.com/(?P<org>[^/]+)/(?P<repo>[^/]+)/pull/(?P<num>[0-9]+)$'''
-key   = "/gh/{{ abbrev .org }}/p/{{ .num }}"
-
-[[rules]]
-name  = "github-issue"
-match = '''^https://github\.com/(?P<org>[^/]+)/(?P<repo>[^/]+)/issues/(?P<num>[0-9]+)$'''
-key   = "/gh/{{ abbrev .org }}/i/{{ .num }}"
-
 [[rules]]
 name     = "gitweb-commit"
 match    = '''^https://gitweb\.dragonflybsd\.org/(?P<repo>[^/]+?)(?:\.git)?/(?:commit|commitdiff)/(?P<sha>[0-9a-f]{40})$'''
 key      = "/g/{{ abbrev .repo }}/{{ .sha }}"
 hash        = "sha"   # capture group to auto-extend for uniqueness
 hash_minlen = 8       # minimum prefix length (>= 4)
+
+[[rules]]
+name  = "github-pr"
+match = '''^https://github\.com/(?P<org>[^/]+)/(?P<repo>[^/]+)/pull/(?P<num>[0-9]+)$'''
+key   = "/gh/{{ abbrev .repo }}/p/{{ .num }}"
+
+[[rules]]
+name  = "github-issue"
+match = '''^https://github\.com/(?P<org>[^/]+)/(?P<repo>[^/]+)/issues/(?P<num>[0-9]+)$'''
+key   = "/gh/{{ abbrev .repo }}/i/{{ .num }}"
 
 # API clients. Each client must own at least one namespace unless admin.
 # Namespaces are listed in priority order; the first one is used as the prefix
