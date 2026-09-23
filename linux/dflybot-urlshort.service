@@ -1,0 +1,15 @@
+[Unit]
+Description=DragonFly Bot - URL Shortener
+After=network.target network-online.target nss-lookup.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/dflybot
+ExecStart=/opt/dflybot/urlshort -config urlshort.toml
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+PrivateTmp=true
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
