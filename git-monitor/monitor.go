@@ -439,49 +439,27 @@ func (m *Monitor) resolveLinks(ctx context.Context, ans []*announcement) {
 		return
 	}
 
-	// Shorten each unique URL once, with a small concurrency bound.  The
-	// same commit may be announced on several branches.
-	const workers = 4
-	var (
-		mu   sync.Mutex
-		wg   sync.WaitGroup
-		sem  = make(chan struct{}, workers)
-		urls = make(map[string]string)
-	)
+	// Shorten each unique URL once.
+	seen := make(map[string]bool, len(ans))
+	targets := make([]string, 0, len(ans))
 	for _, a := range ans {
-		if a.link == "" {
+		if a.link == "" || seen[a.link] {
 			continue
 		}
-		full := a.link
-		mu.Lock()
-		if _, reserved := urls[full]; reserved {
-			mu.Unlock()
-			continue
-		}
-		urls[full] = full // reserve, with the full URL as fallback
-		mu.Unlock()
-
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(full string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			short, err := m.config.Shortener.Shorten(ctx, full)
-			if err != nil {
-				m.logger.Warn("URL shortening failed; using full URL",
-					"url", full, "error", err)
-				return
-			}
-			mu.Lock()
-			urls[full] = short
-			mu.Unlock()
-		}(full)
+		seen[a.link] = true
+		targets = append(targets, a.link)
 	}
-	wg.Wait()
+	if len(targets) == 0 {
+		return
+	}
 
+	short, err := m.config.Shortener.ShortenBatch(ctx, targets)
+	if err != nil {
+		m.logger.Warn("URL shortening failed; using full URLs", "error", err)
+	}
 	for _, a := range ans {
-		if short, ok := urls[a.link]; ok {
-			a.link = short
+		if s, ok := short[a.link]; ok {
+			a.link = s
 		}
 	}
 }

@@ -592,6 +592,20 @@ func (s *testShortener) Shorten(ctx context.Context, target string) (string, err
 	return s.short, nil
 }
 
+func (s *testShortener) ShortenBatch(ctx context.Context, targets []string) (map[string]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, targets...)
+	if s.err != nil {
+		return nil, s.err
+	}
+	out := make(map[string]string, len(targets))
+	for _, target := range targets {
+		out[target] = s.short
+	}
+	return out, nil
+}
+
 func (s *testShortener) Calls() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
