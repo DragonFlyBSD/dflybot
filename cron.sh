@@ -155,7 +155,8 @@ win_index() {
 	tmux display-message -p -t "$session_name:$1" '#{window_index}' 2>/dev/null
 }
 
-# Create the session and windows, then start every program.
+# Create the session and windows, then start the specified program or all
+# programs.
 cmd_start() {
 	name=$1
 	require_tmux
@@ -261,7 +262,7 @@ cmd_status() {
 	exit "$rc"
 }
 
-# Stop all programs; the session and windows are kept.
+# Stop the specified program or all programs; the session and windows are kept.
 cmd_stop() {
 	name=$1
 	require_tmux
