@@ -727,14 +727,25 @@ func requireGetHead(w http.ResponseWriter, r *http.Request) bool {
 // ---------------------------------------------------------------------------
 // Listeners and serving
 
-// listenTCP binds one TCP listener, setting IPV6_V6ONLY on IPv6 sockets so the
-// IPv4 and IPv6 sockets can coexist (C6).
+// listenTCP binds one listen address. IPv4 and IPv6 are bound as separate
+// sockets (C6). The network is pinned to tcp4/tcp6 for IP literals because Go
+// otherwise opens a dual-stack IPv6 socket even for 0.0.0.0, which then claims
+// the IPv6 wildcard and makes a later :: bind fail with EADDRINUSE. Any IPv6
+// socket is forced to IPV6_V6ONLY=1 for the same reason.
 func listenTCP(ctx context.Context, addr string, port int) (net.Listener, error) {
+	network := "tcp"
+	if a, err := netip.ParseAddr(addr); err == nil {
+		if a.Is4() {
+			network = "tcp4"
+		} else {
+			network = "tcp6"
+		}
+	}
 	lc := net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			var setErr error
 			if err := c.Control(func(fd uintptr) {
-				if strings.Contains(addr, ":") {
+				if network == "tcp6" {
 					setErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6,
 						unix.IPV6_V6ONLY, 1)
 				}
@@ -744,7 +755,7 @@ func listenTCP(ctx context.Context, addr string, port int) (net.Listener, error)
 			return setErr
 		},
 	}
-	return lc.Listen(ctx, "tcp", net.JoinHostPort(addr, strconv.Itoa(port)))
+	return lc.Listen(ctx, network, net.JoinHostPort(addr, strconv.Itoa(port)))
 }
 
 // Serve binds all configured listeners and blocks until ctx is canceled or a

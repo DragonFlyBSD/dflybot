@@ -83,8 +83,12 @@ production incidents. Implement and test each one explicitly.
   parse it to `crypto.Signer`, and assign it. autocert then never generates or
   overwrites an account key. Never write to `account_file`. Certificate and
   other state still live in `cache_dir`.
-- **C6. Bind IPv4 and IPv6 as separate sockets.** Set `IPV6_V6ONLY=1` on the v6
-  socket via `net.ListenConfig.Control` when both families are configured.
+- **C6. Bind IPv4 and IPv6 as separate sockets.** Pin the listen network to
+  `tcp4`/`tcp6` for IP literals: with `tcp`, Go opens a dual-stack IPv6 socket
+  even for `0.0.0.0`, which also claims the IPv6 wildcard and makes a later
+  `::` bind fail with `EADDRINUSE`. In `net.ListenConfig.Control`, set
+  `IPV6_V6ONLY=1` whenever the actual socket family is IPv6 (the `network`
+  argument ends in `6`), not based on the configured address string.
   DragonFly is always v6-only, so the flag is a no-op there; on Linux it
   prevents the `0.0.0.0`/`::` `EADDRINUSE` conflict. Never silently ignore a
   bind error.
@@ -686,8 +690,9 @@ When no rule matches:
 ### 9.1 Listeners
 
 - Build one listener per (`listen_addresses` x enabled ports).
-- Bind IPv4 and IPv6 separately; set `IPV6_V6ONLY=1` on v6 when both are
-  configured (C6). Never swallow bind errors.
+- Bind IPv4 and IPv6 separately: pin the network to `tcp4`/`tcp6` for IP
+  literals and set `IPV6_V6ONLY=1` on any IPv6 socket (C6). Never swallow bind
+  errors.
 - HTTPS: create a `tls.Config` from the autocert manager (or the manual cert),
   wrap the listener with `tls.NewListener`, and serve.
 - HTTP/2 over TLS is negotiated via ALPN when `server.http2_enabled` (default

@@ -7,12 +7,50 @@
 package main
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
+
+// TestListenTCPDualStack is a regression test for binding 0.0.0.0 and :: as
+// separate sockets: Go opens a dual-stack IPv6 socket for 0.0.0.0 unless the
+// network is pinned to tcp4, which used to make the IPv6 bind fail with
+// EADDRINUSE.
+func TestListenTCPDualStack(t *testing.T) {
+	ctx := context.Background()
+	ln4, err := listenTCP(ctx, "0.0.0.0", 0)
+	if err != nil {
+		t.Fatalf("listen 0.0.0.0: %v", err)
+	}
+	defer ln4.Close()
+
+	port := ln4.Addr().(*net.TCPAddr).Port
+	ln6, err := listenTCP(ctx, "::", port)
+	if err != nil {
+		t.Fatalf("listen [::]:%d after 0.0.0.0:%d: %v", port, port, err)
+	}
+	defer ln6.Close()
+
+	for _, tc := range []struct {
+		network string
+		host    string
+	}{
+		{"tcp4", "127.0.0.1"},
+		{"tcp6", "::1"},
+	} {
+		conn, err := net.Dial(tc.network, net.JoinHostPort(tc.host, strconv.Itoa(port)))
+		if err != nil {
+			t.Errorf("dial %s: %v", tc.network, err)
+			continue
+		}
+		conn.Close()
+	}
+}
 
 func TestHostValidation(t *testing.T) {
 	e := newTestEnv(t)
