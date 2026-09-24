@@ -7,6 +7,7 @@ all: github-monitor
 all: jenkins-monitor
 all: redmine-monitor
 all: web-monitor
+all: urlshort
 
 .PHONY: dflybot
 dflybot:
@@ -37,4 +38,8 @@ redmine-monitor:
 
 .PHONY: web-monitor
 web-monitor:
+	make -C $@
+
+.PHONY: urlshort
+urlshort:
 	make -C $@
