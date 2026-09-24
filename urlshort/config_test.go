@@ -94,6 +94,8 @@ func TestValidationFailures(t *testing.T) {
 		{"issue timeout", func(c *Config) { c.ACME.IssueTimeout = 0 }, "issue_timeout"},
 		{"read timeout", func(c *Config) { c.Server.ReadTimeout = 0 }, "read_timeout"},
 		{"max header", func(c *Config) { c.Server.MaxHeaderBytes = 0 }, "max_header_bytes"},
+		{"error_log retention", func(c *Config) { c.ErrorLog.RetentionDays = -1 }, "error_log.retention_days"},
+		{"error_log flush", func(c *Config) { c.ErrorLog.FlushInterval = 0 }, "error_log.flush_interval"},
 		{"backup hour", func(c *Config) { c.Backup.HourUTC = 24 }, "hour_utc"},
 		{"backup retention", func(c *Config) { c.Backup.RetentionDays = -1 }, "retention_days"},
 		{"backup tx", func(c *Config) { c.Backup.CompactTxMaxBytes = 0 }, "compact_tx_max_bytes"},

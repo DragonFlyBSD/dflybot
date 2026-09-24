@@ -24,6 +24,15 @@ const (
 	testHost       = "example.com"
 )
 
+// newTestLogging returns a logging that discards console output and creates no
+// error log file.
+func newTestLogging() *logging {
+	return &logging{
+		console: slog.NewTextHandler(io.Discard,
+			&slog.HandlerOptions{Level: slog.LevelError}),
+	}
+}
+
 type testEnv struct {
 	t     *testing.T
 	cfg   *Config
@@ -107,7 +116,7 @@ func newTestEnvWith(t *testing.T, mutate func(*Config)) *testEnv {
 	status := NewStatusState()
 	cert := makeTestCert(t, "example.com")
 	certs := &recordingCertManager{inner: &manualCertManager{cert: &cert}, status: status, logger: slog.Default()}
-	srv, err := NewServer(cfg, store, certs, status, nil)
+	srv, err := NewServer(cfg, store, certs, status, newTestLogging())
 	if err != nil {
 		t.Fatal(err)
 	}

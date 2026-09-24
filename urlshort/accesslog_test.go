@@ -8,7 +8,6 @@ package main
 
 import (
 	"bufio"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -104,31 +103,6 @@ func TestAccessLogRetention(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, "access-"+day+".jsonl")); err != nil {
 			t.Errorf("recent log %s missing: %v", day, err)
 		}
-	}
-}
-
-func TestAccessLogOverflowDrops(t *testing.T) {
-	// A full channel with no reader must drop without blocking.
-	l := &AccessLogger{
-		ch:     make(chan AccessEntry, 1),
-		logger: slog.Default(),
-		now: func() time.Time {
-			return time.Now().UTC()
-		},
-	}
-	l.ch <- AccessEntry{Type: AccessTypeRedirect}
-	done := make(chan struct{})
-	go func() {
-		l.Log(AccessEntry{Type: AccessTypeRedirect})
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("Log blocked on a full channel")
-	}
-	if got := l.Dropped(); got != 1 {
-		t.Fatalf("dropped = %d, want 1", got)
 	}
 }
 

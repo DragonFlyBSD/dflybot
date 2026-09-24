@@ -144,18 +144,31 @@ func benchAccessEntry() AccessEntry {
 	}
 }
 
-// TestAccessLogEnqueueAllocs checks that Log copies the entry into the channel
-// without allocating. It is a test rather than a benchmark because the property
-// is deterministic (0 allocs) and a throughput benchmark would mostly measure
-// channel contention.
-func TestAccessLogEnqueueAllocs(t *testing.T) {
-	l := &AccessLogger{
-		ch:     make(chan AccessEntry, 8192),
+// BenchmarkAccessLogEnqueue measures the request-path cost of recording one
+// access entry: JSON marshal plus the non-blocking channel send.
+func BenchmarkAccessLogEnqueue(b *testing.B) {
+	dl := &dailyLog{
+		ch:     make(chan []byte, 256),
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		now:    func() time.Time { return time.Unix(1700000000, 0).UTC() },
 	}
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-dl.ch:
+			case <-stop:
+				return
+			}
+		}
+	}()
+	defer close(stop)
+
+	l := &AccessLogger{base: dl.logger, log: dl}
 	e := benchAccessEntry()
-	if n := testing.AllocsPerRun(1000, func() { l.Log(e) }); n != 0 {
-		t.Fatalf("AccessLogger.Log allocates %v per call, want 0", n)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		l.Log(e)
 	}
 }

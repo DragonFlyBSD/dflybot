@@ -2,7 +2,8 @@
 log_level = "info"
 
 # Storage root.
-# Contains: links.db, acme/, backup/, logs/access-YYYY-MM-DD.jsonl
+# Contains: links.db, acme/, backup/, logs/access-YYYY-MM-DD.jsonl,
+#           logs/error-YYYY-MM-DD.jsonl
 data_dir = "./data/urlshort"
 
 [server]
@@ -97,6 +98,13 @@ api_ip_rate    = 20
 api_ip_burst   = 40
 
 [access_log]
+retention_days = 30
+flush_interval = 5      # in seconds
+
+[error_log]
+# Write http.Server.ErrorLog and the program's own slog records to log files.
+# Set enabled = false to log server errors to the console only.
+enabled = true
 retention_days = 30
 flush_interval = 5      # in seconds
 

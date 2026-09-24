@@ -180,6 +180,13 @@ production incidents. Implement and test each one explicitly.
   flood the service or the constant-time token scan. Non-admin authenticated
   clients then pass the per-token `api_rate`/`api_burst` limiter. Both return
   `429` with `Retry-After`.
+- **C29. Client-induced server errors go to a file, not the console.** Route
+  `http.Server.ErrorLog` to `<data_dir>/logs/error-YYYY-MM-DD.jsonl` (daily
+  rotation, retention). Our own records and non-handshake server errors also
+  reach the console, but records prefixed with `http: TLS handshake error`
+  (SNI-less scanners, garbage TLS, ancient ciphers) go to the file only.
+  `log_level` filters both destinations. A disabled `[error_log]` falls back to
+  console-only, with no separate file.
 
 ---
 
@@ -235,7 +242,7 @@ all tokens.
 log_level = "info"
 
 # Storage root.
-# Contains: links.db, acme/, logs/access-YYYY-MM-DD.jsonl
+# Contains: links.db, acme/, logs/access-YYYY-MM-DD.jsonl,
 #           logs/error-YYYY-MM-DD.jsonl
 data_dir = "./data/urlshort"
 
@@ -336,6 +343,14 @@ api_ip_burst   = 40
 retention_days = 30
 flush_interval = 5      # in seconds
 
+[error_log]
+# Server error log, written in the same directory as the access log.
+# It captures http.Server.ErrorLog and the program's own slog records.
+# log_level filters both the console and this file.
+enabled = true
+retention_days = 30
+flush_interval = 5      # in seconds
+
 [backup]
 # Daily compacted backup of links.db.
 enabled = true
@@ -424,6 +439,7 @@ Startup must fail (exit non-zero, clear message) if any of these fail.
 | `trusted_proxies` | each entry is an IP or CIDR; a prefix length of 0 warns (trusts every peer) |
 | `hsts` | `enabled` requires `https_port > 0` and `max_age > 0`; `preload` requires `include_subdomains` and `max_age >= 31536000` |
 | `data_dir` | present, ends with `/`, creatable, writable |
+| `access_log` / `error_log` | `retention_days >= 0`; `flush_interval > 0` |
 | `backup` | `dir` (default `<data_dir>backup/`) ends with `/`, creatable and writable; `hour_utc` in [0,23]; `retention_days >= 0`; `startup_retention_count >= 0`; `compact_tx_max_bytes > 0` |
 | rules | unique `name`; regexp compiles and cannot match the empty string; template parses; `key` starts with `/`; `hash` names an existing capture group; `hash_minlen >= 4` when `hash` set and not set otherwise |
 | clients | unique `name`; `enabled` clients have at least one token; plaintext tokens >= 32 chars; `tokens_sha256` entries are 64-char lowercase hex; no token/digest appears in more than one client; enabled non-admin clients have >= 1 namespace |
@@ -703,6 +719,9 @@ When no rule matches:
   set a non-nil `TLSNextProto` without an `h2` entry.
 - Run each server in its own goroutine and report fatal serve errors to a
   channel that triggers shutdown.
+- `http.Server.ErrorLog` is routed through the logging bundle (C29): TLS
+  handshake noise goes to the error log file, while other server errors also
+  reach the console.
 
 ### 9.2 Request gating (all requests)
 
@@ -1050,12 +1069,13 @@ that the operator owns renewal.
 
 ---
 
-## 13. Access logging
+## 13. Logging
 
 ### 13.1 Layout
 
 ```
 <data_dir>/logs/access-YYYY-MM-DD.jsonl   (UTC date, one JSON object per line)
+<data_dir>/logs/error-YYYY-MM-DD.jsonl    (UTC date, one JSON object per line)
 ```
 
 "JSONL" means one object per line. Do not pretty-print.
@@ -1092,7 +1112,7 @@ that the operator owns renewal.
 
 ### 13.3 Writer
 
-- Bounded channel (e.g. 4096) -> single writer goroutine.
+- Shared by both logs. Bounded channel (e.g. 4096) -> single writer goroutine.
 - Buffered writes, periodic `flush_interval` flush (C14).
 - On channel overflow, increment a dropped counter, emit an occasional warning,
   and drop; never block the request path.
@@ -1100,10 +1120,25 @@ that the operator owns renewal.
 
 ### 13.4 Rotation and retention
 
-- Rotate lazily when the UTC date changes on write; open
-  `access-YYYY-MM-DD.jsonl` with `O_CREATE|O_WRONLY|O_APPEND`, mode 0644.
+- Shared by both logs. Rotate lazily when the UTC date changes on write; open
+  the day's file (`access-YYYY-MM-DD.jsonl` or `error-YYYY-MM-DD.jsonl`) with
+  `O_CREATE|O_WRONLY|O_APPEND`, mode 0644.
 - Delete files older than `retention_days` at startup and once per UTC day.
   Deletion failures only warn.
+
+### 13.5 Server error log
+
+- `http.Server.ErrorLog` writes to `error-YYYY-MM-DD.jsonl` using the same
+  `dailyLog` rotation core and the slog JSONL shape (`time`, `level`, `msg`,
+  plus `comp=server`). `[error_log]` (`enabled`, `retention_days`,
+  `flush_interval`) drives rotation and retention.
+- Our own records are fanned out to both the console and the error file;
+  `log_level` filters both destinations.
+- `http.Server.ErrorLog` records go to the error file. Records prefixed with
+  `http: TLS handshake error` (client-induced) are not also written to the
+  console; any other server error (panic, `Accept error`, ...) is (C29).
+- When `error_log.enabled = false`, server errors fall back to the console and
+  no error file is created.
 
 ---
 
@@ -1215,6 +1250,9 @@ urlshort/
   body limit `413`; rate limit `429`; `/status` redaction.
 - **access log**: UTC rotation with an injected clock; retention deletion;
   writer overflow drop path; drain on shutdown.
+- **error log**: JSONL records in both sinks; `log_level` filters both;
+  handshake errors stay out of the console while panics reach it; disabled
+  `error_log` falls back to console-only.
 - **maintenance**: compact a DB with free pages and verify `Check`, counts, and
   a smaller output file; atomic rename; retention cleanup with an injected
   clock; `startup_retention_count` cap (daily backups unaffected); scheduled

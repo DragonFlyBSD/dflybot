@@ -198,6 +198,7 @@ type Server struct {
 	rules       *Ruleset
 	auth        *Authenticator
 	logs        *AccessLogger
+	logging     *logging
 	logger      *slog.Logger
 	certs       CertManager
 	status      *StatusState
@@ -230,11 +231,12 @@ func NewServer(
 	store Store,
 	certs CertManager,
 	status *StatusState,
-	base *slog.Logger,
+	logging *logging,
 ) (srv *Server, err error) {
-	if base == nil {
-		base = slog.Default()
+	if logging == nil {
+		logging = newConsoleLogging(cfg.LogLevel)
 	}
+	logger := logging.logger()
 	if status == nil {
 		status = NewStatusState()
 	}
@@ -244,7 +246,7 @@ func NewServer(
 	}
 
 	logs, err := NewAccessLogger(cfg.LogsDir(), cfg.AccessLog.RetentionDays,
-		time.Duration(cfg.AccessLog.FlushInterval)*time.Second, nil, base)
+		time.Duration(cfg.AccessLog.FlushInterval)*time.Second, nil, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -265,14 +267,14 @@ func NewServer(
 		return nil, err
 	}
 
-	logger := base.With(slog.String("comp", "server"))
 	srv = &Server{
 		cfg:             cfg,
 		store:           store,
 		rules:           rules,
 		auth:            auth,
 		logs:            logs,
-		logger:          logger,
+		logging:         logging,
+		logger:          logger.With(slog.String("comp", "server")),
 		certs:           certs,
 		status:          status,
 		redirectLimiter: NewRateLimiter(cfg.RateLimit.RedirectRate, cfg.RateLimit.RedirectBurst, 10000),
@@ -318,7 +320,7 @@ func (s *Server) newServer(h http.Handler) *http.Server {
 		WriteTimeout:   s.writeTimeout,
 		IdleTimeout:    s.idleTimeout,
 		MaxHeaderBytes: s.cfg.Server.MaxHeaderBytes,
-		ErrorLog:       slog.NewLogLogger(s.logger.Handler(), slog.LevelWarn),
+		ErrorLog:       s.logging.serverErrorLog(),
 	}
 }
 

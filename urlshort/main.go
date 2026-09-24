@@ -39,10 +39,17 @@ func run(configPath string) error {
 	if err != nil {
 		return err
 	}
-	logger := newLogger(cfg.LogLevel)
 	if err := cfg.EnsureDirs(); err != nil {
 		return err
 	}
+	logging, err := newLogging(cfg)
+	if err != nil {
+		return err
+	}
+	defer logging.Close()
+	logger := logging.logger()
+	slog.SetDefault(logger)
+
 	for _, w := range cfg.Warnings {
 		logger.Warn("config warning", "message", w)
 	}
@@ -59,7 +66,7 @@ func run(configPath string) error {
 		return err
 	}
 
-	srv, err := NewServer(cfg, store, certs, status, logger)
+	srv, err := NewServer(cfg, store, certs, status, logging)
 	if err != nil {
 		store.Close()
 		return err
@@ -101,22 +108,4 @@ func run(configPath string) error {
 	}
 	logger.Info("shutdown complete")
 	return nil
-}
-
-func newLogger(level string) *slog.Logger {
-	var lvl slog.Level
-	switch level {
-	case "debug":
-		lvl = slog.LevelDebug
-	case "warn":
-		lvl = slog.LevelWarn
-	case "error":
-		lvl = slog.LevelError
-	default:
-		lvl = slog.LevelInfo
-	}
-	h := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})
-	logger := slog.New(h)
-	slog.SetDefault(logger)
-	return logger
 }

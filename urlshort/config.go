@@ -42,6 +42,7 @@ type Config struct {
 	ACME          ACMEConfig        `toml:"acme"`
 	RateLimit     RateLimitConfig   `toml:"rate_limit"`
 	AccessLog     AccessLogConfig   `toml:"access_log"`
+	ErrorLog      ErrorLogConfig    `toml:"error_log"`
 	Backup        BackupConfig      `toml:"backup"`
 	Abbreviations map[string]string `toml:"abbreviations"`
 	Rules         []RuleConfig      `toml:"rules"`
@@ -133,6 +134,13 @@ type AccessLogConfig struct {
 	FlushInterval int `toml:"flush_interval"`
 }
 
+// ErrorLogConfig holds the server error log configuration.
+type ErrorLogConfig struct {
+	Enabled       bool `toml:"enabled"`
+	RetentionDays int  `toml:"retention_days"`
+	FlushInterval int  `toml:"flush_interval"`
+}
+
 // BackupConfig holds the compacted backup configuration.
 type BackupConfig struct {
 	Enabled               bool   `toml:"enabled"`
@@ -208,6 +216,11 @@ func DefaultConfig() *Config {
 			APIIPBurst:    40,
 		},
 		AccessLog: AccessLogConfig{
+			RetentionDays: 30,
+			FlushInterval: 5,
+		},
+		ErrorLog: ErrorLogConfig{
+			Enabled:       true,
 			RetentionDays: 30,
 			FlushInterval: 5,
 		},
@@ -300,6 +313,7 @@ func (c *Config) Validate() error {
 	c.validateACME(v)
 	c.validateAccess(v)
 	c.validateAccessLog(v)
+	c.validateErrorLog(v)
 	c.validateBackup(v)
 	c.validateRules(v)
 	c.validateClients(v)
@@ -509,6 +523,15 @@ func (c *Config) validateAccessLog(v *validator) {
 	}
 	if c.AccessLog.FlushInterval <= 0 {
 		v.addf("access_log.flush_interval must be > 0")
+	}
+}
+
+func (c *Config) validateErrorLog(v *validator) {
+	if c.ErrorLog.RetentionDays < 0 {
+		v.addf("error_log.retention_days must be >= 0")
+	}
+	if c.ErrorLog.FlushInterval <= 0 {
+		v.addf("error_log.flush_interval must be > 0")
 	}
 }
 
@@ -799,7 +822,7 @@ func (c *Config) GetTrustedProxies() []netip.Prefix {
 	return c.trustedPrefixes
 }
 
-// LogsDir returns the directory holding the daily access log files.
+// LogsDir returns the directory holding the daily log files.
 func (c *Config) LogsDir() string {
 	return filepath.Join(c.DataDir, "logs")
 }
