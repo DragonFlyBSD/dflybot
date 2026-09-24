@@ -127,19 +127,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Setup context and signal handling.
-	ctx, cancel := monitor.SignalContext()
-	defer cancel()
-
 	// Parse the CA bundle once at startup; shared by all webs.
 	caPool, err := loadCAPool(config.TLS.CAFile)
 	if err != nil {
 		slog.Error("CA bundle load failed", "ca_file", config.TLS.CAFile, "error", err)
 		os.Exit(1)
 	}
-	webhook := monitor.NewWebhook(&config.Webhook)
-	wg := &sync.WaitGroup{}
 
+	webhook := monitor.NewWebhook(&config.Webhook)
+
+	// Setup context and signal handling.
+	ctx, cancel := monitor.SignalContext()
+	defer cancel()
+
+	var wg sync.WaitGroup
 	for i := range config.Webs {
 		web := &config.Webs[i]
 		if !web.Enabled {
@@ -162,7 +163,7 @@ func main() {
 		mon := newWebMonitor(web, prober, webhook, &config.Alert, &config.TLS,
 			config.DataDir, nil)
 		wg.Add(1)
-		go mon.Start(ctx, wg)
+		go mon.Start(ctx, &wg)
 	}
 
 	wg.Wait()

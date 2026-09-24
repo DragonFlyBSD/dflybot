@@ -143,10 +143,10 @@ func main() {
 	ctx, cancel := monitor.SignalContext()
 	defer cancel()
 
-	wg := &sync.WaitGroup{}
+	var wg sync.WaitGroup
 	for _, m := range monitors {
 		wg.Add(1)
-		go m.Start(ctx, wg)
+		go m.Start(ctx, &wg)
 	}
 
 	wg.Wait()

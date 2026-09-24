@@ -135,9 +135,9 @@ func main() {
 	ctx, cancel := monitor.SignalContext()
 	defer cancel()
 
-	wg := &sync.WaitGroup{}
+	var wg sync.WaitGroup
 	wg.Add(1)
-	go mon.Start(ctx, wg)
+	go mon.Start(ctx, &wg)
 	wg.Wait()
 	slog.Info("jenkins monitor exited")
 }

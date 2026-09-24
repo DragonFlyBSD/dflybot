@@ -122,9 +122,9 @@ func main() {
 	ctx, cancel := monitor.SignalContext()
 	defer cancel()
 
+	var wg sync.WaitGroup
 	github := newGitHubClient(config.GitHub.Token)
 	webhook := monitor.NewWebhook(&config.Webhook)
-	wg := &sync.WaitGroup{}
 
 	for i := range config.Repos {
 		repo := &config.Repos[i]
@@ -134,7 +134,7 @@ func main() {
 		}
 		mon := NewRepoMonitor(repo, github, webhook, shortener, config.DataDir, nil)
 		wg.Add(1)
-		go mon.Start(ctx, wg)
+		go mon.Start(ctx, &wg)
 	}
 
 	wg.Wait()

@@ -117,9 +117,9 @@ func main() {
 	ctx, cancel := monitor.SignalContext()
 	defer cancel()
 
+	var wg sync.WaitGroup
 	client := newAtomClient()
 	webhook := monitor.NewWebhook(&config.Webhook)
-	wg := &sync.WaitGroup{}
 
 	for i := range config.Projects {
 		project := &config.Projects[i]
@@ -129,7 +129,7 @@ func main() {
 		}
 		mon := NewProjectMonitor(project, client, webhook, shortener, config.DataDir, nil)
 		wg.Add(1)
-		go mon.Start(ctx, wg)
+		go mon.Start(ctx, &wg)
 	}
 
 	wg.Wait()
