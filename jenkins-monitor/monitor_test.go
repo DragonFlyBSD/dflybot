@@ -177,7 +177,7 @@ func newTestMonitor(t *testing.T, cfg *ConfigJenkins, poster *recordPoster) (*Mo
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "dragonfly.state")
 	histPath := filepath.Join(dir, "dragonfly.history")
-	m := NewMonitor(cfg, newJenkinsClient(cfg), poster, statePath, histPath, nil)
+	m := NewMonitor(cfg, newJenkinsClient(cfg), poster, nil, statePath, histPath, nil)
 	m.loadState()
 	m.firstPoll = true
 	return m, statePath
@@ -199,22 +199,22 @@ func TestMonitorStartupFailureAndRestartDedup(t *testing.T) {
 	poster := &recordPoster{}
 	cfg := fakeCfg(ts)
 	m, statePath := newTestMonitor(t, cfg, poster)
-	m.poll() // startup: current failure announced once
+	m.poll(context.Background()) // startup: current failure announced once
 	if got := poster.messages(); len(got) != 1 || !strings.Contains(got[0], "DragonFlyBSD FAILED: build #7") {
 		t.Fatalf("startup messages = %v", got)
 	}
-	m.poll() // no new build; nothing
+	m.poll(context.Background()) // no new build; nothing
 	if got := poster.messages(); len(got) != 1 {
 		t.Fatalf("second poll messages = %v", got)
 	}
 
 	// Restart (same state file, same build): the failure was already
 	// announced and must not be re-announced (same poster would see it).
-	m2 := NewMonitor(cfg, newJenkinsClient(cfg), poster, statePath,
+	m2 := NewMonitor(cfg, newJenkinsClient(cfg), poster, nil, statePath,
 		filepath.Join(filepath.Dir(statePath), "dragonfly.history"), nil)
 	m2.loadState()
 	m2.firstPoll = true
-	m2.poll()
+	m2.poll(context.Background())
 	if got := poster.messages(); len(got) != 1 {
 		t.Fatalf("restart re-announced the failure: %v", got)
 	}
@@ -231,15 +231,15 @@ func TestMonitorFailureRecoveryAndContinuous(t *testing.T) {
 	cfg := fakeCfg(ts)
 	m, _ := newTestMonitor(t, cfg, poster)
 
-	m.poll() // startup failure #1
+	m.poll(context.Background()) // startup failure #1
 	// New failed build #2 while running.
 	stub.setLast("DragonFlyBSD", stubBuild{Number: 2, Result: "FAILURE", URL: buildURL(jobURL, 2)})
 	stub.setBuild("DragonFlyBSD", 2, "FAILURE")
-	m.poll()
+	m.poll(context.Background())
 	// New successful build #3: recovery.
 	stub.setLast("DragonFlyBSD", stubBuild{Number: 3, Result: "SUCCESS", URL: buildURL(jobURL, 3)})
 	stub.setBuild("DragonFlyBSD", 3, "SUCCESS")
-	m.poll()
+	m.poll(context.Background())
 
 	msgs := poster.messages()
 	if len(msgs) != 3 {
@@ -251,7 +251,7 @@ func TestMonitorFailureRecoveryAndContinuous(t *testing.T) {
 	if !strings.Contains(msgs[2], "RECOVERED: build #3 SUCCESS after 2 failed builds") {
 		t.Errorf("recovery msg: %v", msgs[2])
 	}
-	m.poll() // stable healthy; silent
+	m.poll(context.Background()) // stable healthy; silent
 	if got := poster.messages(); len(got) != 3 {
 		t.Errorf("healthy poll announced: %v", got)
 	}
@@ -266,13 +266,13 @@ func TestMonitorIgnoreAborted(t *testing.T) {
 
 	poster := &recordPoster{}
 	m, _ := newTestMonitor(t, fakeCfg(ts), poster)
-	m.poll() // failure #1 announced
+	m.poll(context.Background()) // failure #1 announced
 
 	// Builds #2 (aborted) and #3 (success) complete before the next poll.
 	stub.setBuild("DragonFlyBSD", 2, "ABORTED")
 	stub.setBuild("DragonFlyBSD", 3, "SUCCESS")
 	stub.setLast("DragonFlyBSD", stubBuild{Number: 3, Result: "SUCCESS", URL: buildURL(jobURL, 3)})
-	m.poll()
+	m.poll(context.Background())
 
 	msgs := poster.messages()
 	if len(msgs) != 2 {
@@ -294,23 +294,23 @@ func TestMonitorNodeTransitions(t *testing.T) {
 	cfg := fakeCfg(ts)
 	cfg.Nodes = []string{"Built-In Node"}
 	m, _ := newTestMonitor(t, cfg, poster)
-	m.poll() // baseline; nothing announced (online)
+	m.poll(context.Background()) // baseline; nothing announced (online)
 	if got := poster.messages(); len(got) != 0 {
 		t.Fatalf("baseline announced: %v", got)
 	}
 
 	stub.setComputers([]stubComputer{{DisplayName: "Built-In Node", Offline: true,
 		OfflineCauseReason: "crashed"}})
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 1 || !strings.Contains(got[0], "`Built-In Node` OFFLINE: crashed") {
 		t.Fatalf("offline messages = %v", got)
 	}
-	m.poll() // still offline; silent
+	m.poll(context.Background()) // still offline; silent
 	if got := poster.messages(); len(got) != 1 {
 		t.Fatalf("still-offline poll announced: %v", got)
 	}
 	stub.setComputers([]stubComputer{{DisplayName: "Built-In Node", Offline: false}})
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 2 || !strings.Contains(got[1], "back ONLINE") {
 		t.Fatalf("online messages = %v", got)
 	}
@@ -328,7 +328,7 @@ func TestMonitorNodeStartupOffline(t *testing.T) {
 	cfg := fakeCfg(ts)
 	cfg.Nodes = []string{"Build1"}
 	m, _ := newTestMonitor(t, cfg, poster)
-	m.poll()
+	m.poll(context.Background())
 	msgs := poster.messages()
 	if len(msgs) != 1 || !strings.Contains(msgs[0], "`Build1` OFFLINE: down") {
 		t.Fatalf("startup offline messages = %v", msgs)
@@ -350,7 +350,7 @@ func TestMonitorNodeWhitelist(t *testing.T) {
 	cfg.Nodes = []string{"Keep"}
 	poster := &recordPoster{}
 	m, _ := newTestMonitor(t, cfg, poster)
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 0 {
 		t.Fatalf("whitelist ignored ephemeral: %v", got)
 	}
@@ -365,12 +365,12 @@ func TestMonitorLargeGapCollapses(t *testing.T) {
 
 	poster := &recordPoster{}
 	m, _ := newTestMonitor(t, fakeCfg(ts), poster)
-	m.poll() // failure #1 (1 msg)
+	m.poll(context.Background()) // failure #1 (1 msg)
 
 	// 30 more builds completed while we were away: only the current
 	// failure is announced (not each of the 30).
 	stub.setLast("DragonFlyBSD", stubBuild{Number: 31, Result: "FAILURE", URL: buildURL(jobURL, 31)})
-	m.poll()
+	m.poll(context.Background())
 
 	msgs := poster.messages()
 	if len(msgs) != 2 {
@@ -390,7 +390,7 @@ func TestMonitorStateAndHistoryFiles(t *testing.T) {
 
 	poster := &recordPoster{}
 	m, _ := newTestMonitor(t, fakeCfg(ts), poster)
-	m.poll()
+	m.poll(context.Background())
 	m.saveState()
 
 	if _, err := os.Stat(m.statePath); err != nil {
@@ -427,7 +427,7 @@ func TestMonitorQueueStuckOnceThenCleared(t *testing.T) {
 
 	poster := &recordPoster{}
 	m, _ := newTestMonitor(t, fakeCfg(ts), poster) // QueueStuckAfter unset => default
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 0 {
 		t.Fatalf("young queue item announced: %v", got)
 	}
@@ -435,7 +435,7 @@ func TestMonitorQueueStuckOnceThenCleared(t *testing.T) {
 	// An old queue item is announced once, with the age.
 	stub.setQueue([]stubQueue{queueItemAt(2, now.Add(-10*time.Minute),
 		"Waiting for next available executor")})
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 1 ||
 		!strings.Contains(got[0], "DragonFlyBSD STUCK in queue") ||
 		!strings.Contains(got[0], "since 10m ago") {
@@ -443,14 +443,14 @@ func TestMonitorQueueStuckOnceThenCleared(t *testing.T) {
 	}
 
 	// ... and not again while the same item stays queued.
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 1 {
 		t.Fatalf("stuck re-announced: %v", got)
 	}
 
 	// When the item clears, announce once.
 	stub.setQueue(nil)
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 2 || !strings.Contains(got[1], "queue cleared") {
 		t.Fatalf("cleared messages = %v", got)
 	}
@@ -468,7 +468,7 @@ func TestMonitorQueueStuckFlag(t *testing.T) {
 
 	poster := &recordPoster{}
 	m, _ := newTestMonitor(t, fakeCfg(ts), poster)
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 1 ||
 		!strings.Contains(got[0], "STUCK in queue: no available executors") {
 		t.Fatalf("stuck-flag messages = %v", got)
@@ -487,8 +487,50 @@ func TestNodeDisabledByDefault(t *testing.T) {
 
 	poster := &recordPoster{}
 	m, _ := newTestMonitor(t, fakeCfg(ts), poster) // no nodes configured
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 0 {
 		t.Fatalf("ephemeral offline announced without whitelist: %v", got)
+	}
+}
+
+type fakeShortener struct {
+	short string
+	err   error
+	calls []string
+}
+
+func (f *fakeShortener) Shorten(_ context.Context, target string) (string, error) {
+	f.calls = append(f.calls, target)
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.short, nil
+}
+
+func (f *fakeShortener) ShortenBatch(_ context.Context, targets []string) (map[string]string, error) {
+	f.calls = append(f.calls, targets...)
+	out := make(map[string]string, len(targets))
+	for _, target := range targets {
+		out[target] = f.short
+	}
+	if f.err != nil {
+		return map[string]string{}, f.err
+	}
+	return out, nil
+}
+
+func TestFailTextShortensURL(t *testing.T) {
+	fs := &fakeShortener{short: "https://s.example/ci"}
+	cfg := &ConfigJenkins{Name: "dragonfly", Jobs: []string{"j"}}
+	m := NewMonitor(cfg, nil, &recordPoster{}, fs, "state", "history", nil)
+
+	got := m.failText(context.Background(), "j", &jenkinsBuild{
+		Number: 3, Result: "FAILURE", URL: "https://ci/job/j/3/",
+	}, 1)
+	if !strings.Contains(got, "https://s.example/ci") {
+		t.Errorf("failure text does not use the short URL: %s", got)
+	}
+	if len(fs.calls) != 1 || fs.calls[0] != "https://ci/job/j/3/" {
+		t.Errorf("shortener calls = %v", fs.calls)
 	}
 }

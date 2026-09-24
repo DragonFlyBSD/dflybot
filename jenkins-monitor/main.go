@@ -35,6 +35,9 @@ type Config struct {
 	Jenkins ConfigJenkins `toml:"jenkins" validate:"required"`
 	// Webhook settings
 	Webhook monitor.ConfigWebhook `toml:"webhook" validate:"required"`
+	// URL shortener settings (optional; when absent the full URLs are
+	// announced).
+	URLShort *monitor.ConfigURLShort `toml:"urlshort"`
 }
 
 type ConfigJenkins struct {
@@ -111,21 +114,30 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Setup context and signal handling
-	ctx, cancel := monitor.SignalContext()
-	defer cancel()
+	var shortener monitor.Shortener
+	if config.URLShort != nil {
+		s, err := monitor.NewURLShortener(config.URLShort)
+		if err != nil {
+			slog.Error("invalid urlshort config", "error", err)
+			os.Exit(1)
+		}
+		shortener = s
+	}
 
 	jenkins := newJenkinsClient(&config.Jenkins)
 	webhook := monitor.NewWebhook(&config.Webhook)
-
-	monitor := NewMonitor(&config.Jenkins, jenkins, webhook,
+	mon := NewMonitor(&config.Jenkins, jenkins, webhook, shortener,
 		filepath.Join(config.DataDir, config.Jenkins.Name+".state"),
 		filepath.Join(config.DataDir, config.Jenkins.Name+".history"),
 		nil)
 
+	// Setup context and signal handling
+	ctx, cancel := monitor.SignalContext()
+	defer cancel()
+
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
-	go monitor.Start(ctx, wg)
+	go mon.Start(ctx, wg)
 	wg.Wait()
 	slog.Info("jenkins monitor exited")
 }

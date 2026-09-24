@@ -109,7 +109,7 @@ func newTestMonitor(t *testing.T, ts *httptest.Server, cfg *ConfigRepo, poster *
 	}
 	client := newGitHubClient("")
 	client.baseURL = ts.URL
-	m := NewRepoMonitor(cfg, client, poster, dir, nil)
+	m := NewRepoMonitor(cfg, client, poster, nil, dir, nil)
 	m.loadState()
 	return m, dir
 }
@@ -143,7 +143,7 @@ func TestMonitorSeedThenAnnounce(t *testing.T) {
 	poster := &recordPoster{}
 	m, dir := newTestMonitor(t, ts, defaultRepo(), poster)
 
-	m.poll() // first run: seed, no announcements
+	m.poll(context.Background()) // first run: seed, no announcements
 	if got := poster.messages(); len(got) != 0 {
 		t.Fatalf("seed announced: %v", got)
 	}
@@ -152,14 +152,14 @@ func TestMonitorSeedThenAnnounce(t *testing.T) {
 	}
 
 	// No new events (304): nothing announced.
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 0 {
 		t.Fatalf("unchanged poll announced: %v", got)
 	}
 
 	// New events: announced and recorded in the history.
 	stub.setEvents(`"e2"`, []string{openEventAt("5", t1), openEventAt("4", t1)})
-	m.poll()
+	m.poll(context.Background())
 	msgs := poster.messages()
 	if len(msgs) != 1 || !strings.Contains(msgs[0], "[o/r] ") ||
 		!strings.Contains(msgs[0], "issue #12 (fix foo) opened by aly") {
@@ -193,11 +193,11 @@ func TestMonitorMixedIDPools(t *testing.T) {
 
 	poster := &recordPoster{}
 	m, _ := newTestMonitor(t, ts, defaultRepo(), poster)
-	m.poll() // seed silently
+	m.poll(context.Background()) // seed silently
 
 	// A DeleteEvent with a much larger id arrives together with a comment.
 	stub.setEvents(`"e1"`, []string{deleteAt("20309194091", t1), commentAt("14550033122", t1)})
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 1 ||
 		!strings.Contains(got[0], "commented on issue #12") {
 		t.Fatalf("after delete+comment: %v", got)
@@ -206,7 +206,7 @@ func TestMonitorMixedIDPools(t *testing.T) {
 	// Later comments carry smaller ids than the DeleteEvent: they must still
 	// be announced (watermark is time-based, not id-based).
 	stub.setEvents(`"e2"`, []string{commentAt("14553206432", t2), commentAt("14551077752", t2)})
-	m.poll()
+	m.poll(context.Background())
 	msgs := poster.messages()
 	if len(msgs) != 2 {
 		t.Fatalf("total messages = %d, want 2: %v", len(msgs), msgs)
@@ -237,11 +237,11 @@ func TestMonitorEmptyRepoSeedsState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := NewRepoMonitor(cfg, client, poster, dir, nil)
+	m := NewRepoMonitor(cfg, client, poster, nil, dir, nil)
 	m.loadState() // rejects the v1 file
 
 	// First poll on the empty repo: seeds and rewrites the state as v2.
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 0 {
 		t.Fatalf("empty-repo poll announced: %v", got)
 	}
@@ -258,19 +258,19 @@ func TestMonitorEmptyRepoSeedsState(t *testing.T) {
 	}
 
 	// No changes: 304, nothing announced.
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 0 {
 		t.Fatalf("unchanged empty poll announced: %v", got)
 	}
 
 	// The first real event appears: it must be announced once.
 	stub.setEvents(`"e2"`, []string{openEventAt("500", "2026-09-06T11:00:00Z")})
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 1 || !strings.Contains(got[0], "opened by") {
 		t.Fatalf("first event messages = %v", got)
 	}
 	// And it must not be re-announced on a repeated poll.
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 1 {
 		t.Fatalf("first event re-announced: %v", got)
 	}
@@ -287,17 +287,17 @@ func TestMonitorSameSecondBoundary(t *testing.T) {
 
 	poster := &recordPoster{}
 	m, _ := newTestMonitor(t, ts, defaultRepo(), poster)
-	m.poll() // seed at sameT, boundary = {100}
+	m.poll(context.Background()) // seed at sameT, boundary = {100}
 
 	// A new event in the same second arrives with a changed etag.
 	stub.setEvents(`"e1"`, []string{openEventAt("101", sameT), openEventAt("100", sameT)})
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 1 {
 		t.Fatalf("same-second poll = %v", got)
 	}
 	// Redelivery of the same second's events must not re-announce.
 	stub.setEvents(`"e2"`, []string{openEventAt("101", sameT), openEventAt("100", sameT)})
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 1 {
 		t.Fatalf("redelivered same-second events re-announced: %v", got)
 	}
@@ -318,21 +318,21 @@ func TestMonitorRestartDedupe(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m1 := NewRepoMonitor(cfg, client, poster, dir, nil)
+	m1 := NewRepoMonitor(cfg, client, poster, nil, dir, nil)
 	m1.loadState()
-	m1.poll() // seed, watermark = 10
+	m1.poll(context.Background()) // seed, watermark = 10
 
 	// Restart: a fresh monitor over the same state dir must not re-announce.
-	m2 := NewRepoMonitor(cfg, client, poster, dir, nil)
+	m2 := NewRepoMonitor(cfg, client, poster, nil, dir, nil)
 	m2.loadState()
-	m2.poll()
+	m2.poll(context.Background())
 	if got := poster.messages(); len(got) != 0 {
 		t.Fatalf("restart re-announced: %v", got)
 	}
 
 	// Only genuinely new events are announced after the restart.
 	stub.setEvents(`"e2"`, []string{openEvent("12"), openEvent("11")})
-	m2.poll()
+	m2.poll(context.Background())
 	if got := poster.messages(); len(got) != 1 ||
 		!strings.Contains(got[0], "issue #12") ||
 		!strings.Contains(got[0], "opened by") {
@@ -356,13 +356,13 @@ func TestMonitorActionFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := NewRepoMonitor(cfg, client, poster, dir, nil)
+	m := NewRepoMonitor(cfg, client, poster, nil, dir, nil)
 	m.loadState()
-	m.poll() // seed watermark 20
+	m.poll(context.Background()) // seed watermark 20
 
 	// A closed issue and a new opened issue: only the opened one is wanted.
 	stub.setEvents(`"e2"`, []string{openEvent("21"), closeEvent("22")})
-	m.poll()
+	m.poll(context.Background())
 	msgs := poster.messages()
 	if len(msgs) != 1 || !strings.Contains(msgs[0], "issue #") || !strings.Contains(msgs[0], "opened by") {
 		t.Fatalf("messages = %v", msgs)
@@ -390,12 +390,12 @@ func TestMonitorIgnoreUsers(t *testing.T) {
 	cfg := defaultRepo()
 	cfg.IgnoredUsers = []string{"aly"} // openEvent/closeEvent are authored by aly
 	m, _ := newTestMonitor(t, ts, cfg, poster)
-	m.poll() // seed
+	m.poll(context.Background()) // seed
 
 	// An ignored issue event and a comment by another user (zoe) in the
 	// same second: only the comment is announced.
 	stub.setEvents(`"e1"`, []string{commentAt("14550033122", t1), openEventAt("2", t1)})
-	m.poll()
+	m.poll(context.Background())
 	msgs := poster.messages()
 	if len(msgs) != 1 || !strings.Contains(msgs[0], "zoe commented on issue #12") {
 		t.Fatalf("messages = %v", msgs)
@@ -403,7 +403,7 @@ func TestMonitorIgnoreUsers(t *testing.T) {
 
 	// A redelivery with a new etag must not re-announce the ignored event.
 	stub.setEvents(`"e2"`, []string{commentAt("14550033122", t1), openEventAt("2", t1)})
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 1 {
 		t.Fatalf("ignored event re-processed: %v", got)
 	}
@@ -428,10 +428,10 @@ func TestMonitorIgnoreUsersSkipsPRFetch(t *testing.T) {
 	cfg := defaultRepo()
 	cfg.IgnoredUsers = []string{"somebot"}
 	m, _ := newTestMonitor(t, ts, cfg, poster)
-	m.poll() // seed
+	m.poll(context.Background()) // seed
 
 	stub.setEvents(`"e1"`, []string{prEvent})
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 0 {
 		t.Fatalf("ignored PR announced: %v", got)
 	}
@@ -454,18 +454,18 @@ func TestMonitorBatching(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := NewRepoMonitor(cfg, client, poster, dir, nil)
+	m := NewRepoMonitor(cfg, client, poster, nil, dir, nil)
 	m.loadState()
 	// Seed with one old event, then announce 20 new ones in one poll.
 	stub.setEvents(`"e0"`, []string{openEvent("0")})
-	m.poll()
+	m.poll(context.Background())
 
 	var list []string
 	for i := 100; i < 120; i++ {
 		list = append(list, openEvent(fmt.Sprintf("%d", i)))
 	}
 	stub.setEvents(`"e1"`, list)
-	m.poll()
+	m.poll(context.Background())
 
 	msgs := poster.messages()
 	if len(msgs) < 2 {
@@ -493,14 +493,14 @@ func TestMonitorCommentEvent(t *testing.T) {
 
 	poster := &recordPoster{}
 	m, _ := newTestMonitor(t, ts, defaultRepo(), poster)
-	m.poll() // seed
+	m.poll(context.Background()) // seed
 
 	stub.setEvents(`"e1"`, []string{
 		`{"id":"78","type":"IssueCommentEvent","created_at":"2026-09-06T12:01:00Z",
 		"actor":{"login":"zoe"},"payload":{"action":"created","issue":{
 		"number":12,"title":"fix foo","html_url":"https://github.com/o/r/issues/12",
 		"state":"open","user":{"login":"bob"}},"comment":{"body":"please take a look"}}}`})
-	m.poll()
+	m.poll(context.Background())
 	msgs := poster.messages()
 	if len(msgs) != 1 || !strings.Contains(msgs[0], "zoe commented on issue #12: please take a look") {
 		t.Fatalf("comment messages = %v", msgs)
@@ -530,20 +530,20 @@ func TestMonitorReviewCommentEvent(t *testing.T) {
 
 	poster := &recordPoster{}
 	m, dir := newTestMonitor(t, ts, defaultRepo(), poster)
-	m.poll() // seed
+	m.poll(context.Background()) // seed
 
 	stub.setEvents(`"e1"`, []string{
 		reviewEvent("200", "created", "2026-09-12T05:57:43Z", "A bunch of minor suggestions. Thank you."),
 		reviewEvent("199", "updated", "2026-09-12T05:57:41Z", "A bunch of minor suggestions. Thank you."),
 	})
-	m.poll()
+	m.poll(context.Background())
 	msgs := poster.messages()
 	if len(msgs) != 1 || !strings.Contains(msgs[0],
 		"zoe commented on PR #55: A bunch of minor suggestions. Thank you.") {
 		t.Fatalf("review messages = %v", msgs)
 	}
 	// A redelivery must not re-announce the review.
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 1 {
 		t.Fatalf("review re-announced: %v", got)
 	}
@@ -636,13 +636,13 @@ func TestMonitorPRDetailsAndMerge(t *testing.T) {
 
 	poster := &recordPoster{}
 	m, dir := newTestMonitor(t, ts, defaultRepo(), poster)
-	m.poll() // seed silently
+	m.poll(context.Background()) // seed silently
 
 	stub.setEvents(`"e1"`, []string{
 		prEvent("14672592472", "merged", "2026-09-08T23:59:54Z"), // newest first
 		prEvent("14672578728", "opened", "2026-09-08T23:59:31Z"),
 	})
-	m.poll()
+	m.poll(context.Background())
 
 	msgs := poster.messages()
 	if len(msgs) != 1 {
@@ -673,5 +673,53 @@ func TestMonitorPRDetailsAndMerge(t *testing.T) {
 		if !strings.Contains(string(hist), want) {
 			t.Errorf("history missing %q:\n%s", want, hist)
 		}
+	}
+}
+
+type fakeShortener struct {
+	short string
+	err   error
+	calls []string
+}
+
+func (f *fakeShortener) Shorten(_ context.Context, target string) (string, error) {
+	f.calls = append(f.calls, target)
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.short, nil
+}
+
+func (f *fakeShortener) ShortenBatch(_ context.Context, targets []string) (map[string]string, error) {
+	f.calls = append(f.calls, targets...)
+	out := make(map[string]string, len(targets))
+	for _, target := range targets {
+		out[target] = f.short
+	}
+	if f.err != nil {
+		return map[string]string{}, f.err
+	}
+	return out, nil
+}
+
+func TestAnnounceShortensCreateURL(t *testing.T) {
+	poster := &recordPoster{}
+	fs := &fakeShortener{short: "https://s.example/gh"}
+	m := NewRepoMonitor(defaultRepo(), nil, poster, fs, t.TempDir(), nil)
+
+	m.announce(context.Background(), []activity{{
+		kind: activityIssue, action: "create", number: 12,
+		actor: "aly", title: "fix foo", url: "https://github.com/o/r/issues/12",
+	}})
+
+	msgs := poster.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %v", msgs)
+	}
+	if !strings.Contains(msgs[0], "https://s.example/gh") {
+		t.Errorf("message does not use the short URL: %s", msgs[0])
+	}
+	if len(fs.calls) != 1 || fs.calls[0] != "https://github.com/o/r/issues/12" {
+		t.Errorf("shortener calls = %v", fs.calls)
 	}
 }

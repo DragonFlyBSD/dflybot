@@ -127,9 +127,10 @@ type historyLine struct {
 }
 
 type Monitor struct {
-	cfg     *ConfigJenkins
-	jenkins *jenkinsClient
-	poster  monitor.Poster
+	cfg       *ConfigJenkins
+	jenkins   *jenkinsClient
+	poster    monitor.Poster
+	shortener monitor.Shortener
 
 	statePath   string
 	historyPath string
@@ -149,6 +150,7 @@ func NewMonitor(
 	cfg *ConfigJenkins,
 	jenkins *jenkinsClient,
 	poster monitor.Poster,
+	shortener monitor.Shortener,
 	statePath string,
 	historyPath string,
 	base *slog.Logger,
@@ -161,6 +163,7 @@ func NewMonitor(
 		cfg:         cfg,
 		jenkins:     jenkins,
 		poster:      poster,
+		shortener:   shortener,
 		statePath:   statePath,
 		historyPath: historyPath,
 		history:     monitor.NewHistory(historyPath),
@@ -188,27 +191,27 @@ func (m *Monitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 		"url", m.cfg.URL, "jobs", len(m.cfg.Jobs),
 		"interval", m.cfg.Interval)
 
-	monitor.Loop(ctx, time.Duration(m.cfg.Interval)*time.Second, m.poll)
+	monitor.Loop(ctx, time.Duration(m.cfg.Interval)*time.Second, func() { m.poll(ctx) })
 	m.logger.Debug("monitor exiting")
 }
 
 // poll checks all jobs and nodes once and announces any state changes.
-func (m *Monitor) poll() {
+func (m *Monitor) poll(ctx context.Context) {
 	// Poll errors are logged and skipped so that a Jenkins outage never
 	// causes bogus "recovery" announcements.  State is only saved (and the
 	// first-poll handling left behind) after a fully successful poll.
 	ok := true
 	for _, name := range m.cfg.Jobs {
-		if err := m.pollJob(name); err != nil {
+		if err := m.pollJob(ctx, name); err != nil {
 			m.logger.Warn("job poll failed", "job", name, "error", err)
 			ok = false
 		}
 	}
-	if err := m.pollNodes(); err != nil {
+	if err := m.pollNodes(ctx); err != nil {
 		m.logger.Warn("node poll failed", "error", err)
 		ok = false
 	}
-	if err := m.pollQueue(); err != nil {
+	if err := m.pollQueue(ctx); err != nil {
 		m.logger.Warn("queue poll failed", "error", err)
 		ok = false
 	}
@@ -225,7 +228,7 @@ func (m *Monitor) poll() {
 }
 
 // pollJob announces any new failed build(s) of one job.
-func (m *Monitor) pollJob(name string) error {
+func (m *Monitor) pollJob(ctx context.Context, name string) error {
 	now := time.Now()
 	cur, err := m.jenkins.lastCompleted(name)
 	if err != nil {
@@ -251,7 +254,7 @@ func (m *Monitor) pollJob(name string) error {
 	// Startup (re)handling: only announce the current failure, and skip it
 	// if the same failed build was already announced in a previous run.
 	if m.firstPoll || st.LastBuild == 0 {
-		m.collapseCurrent(name, st, cur)
+		m.collapseCurrent(ctx, name, st, cur)
 		m.logHistory(st.toHistory(name))
 		return nil
 	}
@@ -261,7 +264,7 @@ func (m *Monitor) pollJob(name string) error {
 		// build instead of announcing every missed build.
 		m.logger.Warn("large build gap, collapsing onto latest",
 			"job", name, "gap", cur.Number-st.LastBuild)
-		m.collapseCurrent(name, st, cur)
+		m.collapseCurrent(ctx, name, st, cur)
 		m.logHistory(st.toHistory(name))
 		return nil
 	}
@@ -275,7 +278,7 @@ func (m *Monitor) pollJob(name string) error {
 			}
 			return err // transient error; retry next poll
 		}
-		m.processBuild(name, st, b)
+		m.processBuild(ctx, name, st, b)
 	}
 	st.LastBuild = cur.Number
 	m.logHistory(st.toHistory(name))
@@ -285,13 +288,13 @@ func (m *Monitor) pollJob(name string) error {
 // collapseCurrent applies only the newest build (startup or big gap):
 // announce a failure once with an estimated consecutive count, otherwise
 // just adopt the state.  Missed intermediate builds are not announced.
-func (m *Monitor) collapseCurrent(job string, st *jobState, cur *jenkinsBuild) {
+func (m *Monitor) collapseCurrent(ctx context.Context, job string, st *jobState, cur *jenkinsBuild) {
 	switch cur.Result {
 	case "FAILURE", "UNSTABLE":
 		st.Consecutive++
 		st.State = stateFailed
 		st.Announced = cur.Number
-		m.announce(m.failText(job, cur, st.Consecutive))
+		m.announce(ctx, m.failText(ctx, job, cur, st.Consecutive))
 		m.logger.Info("failure announced", "build", cur.Number, "consecutive", st.Consecutive)
 	case "SUCCESS":
 		st.State = stateOK
@@ -308,11 +311,11 @@ func (m *Monitor) collapseCurrent(job string, st *jobState, cur *jenkinsBuild) {
 }
 
 // processBuild announces one completed build and updates the state.
-func (m *Monitor) processBuild(job string, st *jobState, b *jenkinsBuild) {
+func (m *Monitor) processBuild(ctx context.Context, job string, st *jobState, b *jenkinsBuild) {
 	switch b.Result {
 	case "SUCCESS":
 		if st.State == stateFailed {
-			m.announce(m.recoverText(job, b, st.Consecutive))
+			m.announce(ctx, m.recoverText(ctx, job, b, st.Consecutive))
 			m.logger.Info("recovery announced", "build", b.Number, "after", st.Consecutive)
 		}
 		st.State = stateOK
@@ -321,7 +324,7 @@ func (m *Monitor) processBuild(job string, st *jobState, b *jenkinsBuild) {
 		st.Consecutive++
 		st.State = stateFailed
 		st.Announced = b.Number
-		m.announce(m.failText(job, b, st.Consecutive))
+		m.announce(ctx, m.failText(ctx, job, b, st.Consecutive))
 		m.logger.Info("failure announced", "build", b.Number, "consecutive", st.Consecutive)
 	default:
 		// ABORTED / NOT_BUILT / "" (running): keep the last state.
@@ -334,7 +337,7 @@ func (m *Monitor) processBuild(job string, st *jobState, b *jenkinsBuild) {
 
 // pollNodes announces node offline/online transitions for the nodes listed in
 // the config.  With no nodes configured, node monitoring is disabled.
-func (m *Monitor) pollNodes() error {
+func (m *Monitor) pollNodes(ctx context.Context) error {
 	if len(m.cfg.Nodes) == 0 {
 		return nil // no nodes configured; ignore all executors
 	}
@@ -358,7 +361,7 @@ func (m *Monitor) pollNodes() error {
 			st = &nodeState{Offline: n.Offline, Reason: n.OfflineCauseReason, Seen: now.Unix()}
 			m.state.Nodes[n.DisplayName] = st
 			if n.Offline {
-				m.announce(m.nodeText(n.DisplayName, true, n.OfflineCauseReason))
+				m.announce(ctx, m.nodeText(n.DisplayName, true, n.OfflineCauseReason))
 				m.logger.Info("node offline announced", "node", n.DisplayName,
 					"reason", n.OfflineCauseReason)
 				m.logHistory(st.toHistory(n.DisplayName))
@@ -367,14 +370,14 @@ func (m *Monitor) pollNodes() error {
 			st.Offline = false
 			st.Reason = ""
 			st.Seen = now.Unix()
-			m.announce(m.nodeText(n.DisplayName, false, ""))
+			m.announce(ctx, m.nodeText(n.DisplayName, false, ""))
 			m.logger.Info("node online announced", "node", n.DisplayName)
 			m.logHistory(st.toHistory(n.DisplayName))
 		case !st.Offline && n.Offline:
 			st.Offline = true
 			st.Reason = n.OfflineCauseReason
 			st.Seen = now.Unix()
-			m.announce(m.nodeText(n.DisplayName, true, n.OfflineCauseReason))
+			m.announce(ctx, m.nodeText(n.DisplayName, true, n.OfflineCauseReason))
 			m.logger.Info("node offline announced", "node", n.DisplayName,
 				"reason", n.OfflineCauseReason)
 			m.logHistory(st.toHistory(n.DisplayName))
@@ -397,7 +400,7 @@ func (m *Monitor) pollNodes() error {
 // executor.  A job whose queue item is older than queue_stuck_after (or
 // that Jenkins itself marks as stuck) is announced once per queue item;
 // when the item clears, a "queue cleared" message is announced.
-func (m *Monitor) pollQueue() error {
+func (m *Monitor) pollQueue(ctx context.Context) error {
 	items, err := m.jenkins.queueItems()
 	if err != nil {
 		return err
@@ -428,7 +431,7 @@ func (m *Monitor) pollQueue() error {
 			if st.StuckItemID != 0 {
 				age := time.Since(time.UnixMilli(st.StuckSince))
 				m.logger.Info("queue cleared", "job", name, "item", st.StuckItemID)
-				m.announce(m.queueText(name, "queue cleared", "", age))
+				m.announce(ctx, m.queueText(name, "queue cleared", "", age))
 				m.logHistory(&historyLine{Type: "queue", Name: name, State: "cleared",
 					StuckTime: age.Milliseconds()})
 				st.StuckItemID = 0
@@ -451,7 +454,7 @@ func (m *Monitor) pollQueue() error {
 			st.StuckWhy = item.Why
 			m.logger.Info("job stuck in queue", "job", name, "item", item.ID,
 				"why", item.Why, "age", age)
-			m.announce(m.queueText(name, "STUCK in queue", item.Why, age))
+			m.announce(ctx, m.queueText(name, "STUCK in queue", item.Why, age))
 			m.logHistory(&historyLine{Type: "queue", Name: name, State: "stuck",
 				Reason: item.Why, QueueTime: age.Milliseconds()})
 		}
@@ -459,18 +462,29 @@ func (m *Monitor) pollQueue() error {
 	return nil
 }
 
-func (m *Monitor) announce(text string) {
+func (m *Monitor) announce(ctx context.Context, text string) {
 	msg := fmt.Sprintf("[%s] %s", m.cfg.Name, text)
 	m.logger.Debug("announce message", "msg", msg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	if err := m.poster.Post(ctx, msg); err != nil {
 		m.logger.Error("announce failed", "msg", msg, "error", err)
 	}
 }
 
-func (m *Monitor) failText(job string, b *jenkinsBuild, consecutive int) string {
+func (m *Monitor) shortenURL(ctx context.Context, target string) string {
+	if m.shortener == nil || target == "" {
+		return target
+	}
+	short, err := m.shortener.Shorten(ctx, target)
+	if err != nil {
+		m.logger.Warn("URL shortening failed; using full URL", "url", target, "error", err)
+		return target
+	}
+	return short
+}
+
+func (m *Monitor) failText(ctx context.Context, job string, b *jenkinsBuild, consecutive int) string {
+	url := m.shortenURL(ctx, b.URL)
 	text := fmt.Sprintf("%s FAILED: build #%d", job, b.Number)
 	if b.Result == "UNSTABLE" {
 		text += " (UNSTABLE)"
@@ -478,13 +492,14 @@ func (m *Monitor) failText(job string, b *jenkinsBuild, consecutive int) string 
 	if consecutive > 1 {
 		text += fmt.Sprintf(" (%d consecutive failures)", consecutive)
 	}
-	text += " " + b.URL
+	text += " " + url
 	return strings.TrimSpace(text)
 }
 
-func (m *Monitor) recoverText(job string, b *jenkinsBuild, after int) string {
+func (m *Monitor) recoverText(ctx context.Context, job string, b *jenkinsBuild, after int) string {
+	url := m.shortenURL(ctx, b.URL)
 	return fmt.Sprintf("%s RECOVERED: build #%d SUCCESS after %d failed builds %s",
-		job, b.Number, after, b.URL)
+		job, b.Number, after, url)
 }
 
 func (m *Monitor) nodeText(name string, offline bool, reason string) string {

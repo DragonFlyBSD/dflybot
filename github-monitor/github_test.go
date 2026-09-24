@@ -73,7 +73,7 @@ func TestEventIDTolerance(t *testing.T) {
 }
 
 func TestClassify(t *testing.T) {
-	mon := NewRepoMonitor(&ConfigRepo{Project: "o", Repo: "r"}, nil, nil, t.TempDir(), nil)
+	mon := NewRepoMonitor(&ConfigRepo{Project: "o", Repo: "r"}, nil, nil, nil, t.TempDir(), nil)
 	tests := []struct {
 		raw        string
 		wantAction string
@@ -151,7 +151,7 @@ func TestUserIgnored(t *testing.T) {
 func TestClassifyIgnoredUser(t *testing.T) {
 	// eventJSON always uses actor "aly".
 	mon := NewRepoMonitor(&ConfigRepo{Project: "o", Repo: "r",
-		IgnoredUsers: []string{"ALY"}}, nil, nil, t.TempDir(), nil)
+		IgnoredUsers: []string{"ALY"}}, nil, nil, nil, t.TempDir(), nil)
 	if _, ok := mon.classify(decodeEvent(t, eventJSON("IssuesEvent", "1", "opened"))); ok {
 		t.Error("event from an ignored user was classified")
 	}

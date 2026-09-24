@@ -41,3 +41,12 @@ token = "???"
 from = "github-monitor"
 # Target to announce the messages
 target = "#dragonflybsd"
+
+[urlshort]
+# Base URL of the URL shortener API, including the version prefix.
+# Optional: when omitted, the full URLs are announced.
+api = "https://example.com/.api/v1"
+# Bearer token to authenticate with the URL shortener API
+token = "???"
+# Total HTTP request timeout in seconds
+timeout = 5

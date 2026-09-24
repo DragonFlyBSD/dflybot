@@ -199,10 +199,11 @@ func (st *projState) setLast(at time.Time, ids []string) {
 }
 
 type ProjectMonitor struct {
-	cfg    *ConfigProject
-	client *atomClient
-	poster monitor.Poster
-	logger *slog.Logger
+	cfg       *ConfigProject
+	client    *atomClient
+	poster    monitor.Poster
+	shortener monitor.Shortener
+	logger    *slog.Logger
 
 	statePath   string
 	historyPath string
@@ -215,6 +216,7 @@ func NewProjectMonitor(
 	cfg *ConfigProject,
 	client *atomClient,
 	poster monitor.Poster,
+	shortener monitor.Shortener,
 	dataDir string,
 	base *slog.Logger,
 ) *ProjectMonitor {
@@ -226,6 +228,7 @@ func NewProjectMonitor(
 		cfg:         cfg,
 		client:      client,
 		poster:      poster,
+		shortener:   shortener,
 		logger:      logger,
 		statePath:   filepath.Join(dataDir, cfg.Name+".state"),
 		historyPath: filepath.Join(dataDir, cfg.Name+".history"),
@@ -256,17 +259,17 @@ func (m *ProjectMonitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 	m.logger.Info("redmine project monitor started",
 		"interval", m.cfg.Interval, "last_at", m.state.LastAt)
 
-	monitor.Loop(ctx, time.Duration(m.cfg.Interval)*time.Second, m.poll)
+	monitor.Loop(ctx, time.Duration(m.cfg.Interval)*time.Second, func() { m.poll(ctx) })
 	m.logger.Debug("project monitor exiting")
 }
 
 // poll fetches the activity feed once and announces the new activities.
-func (m *ProjectMonitor) poll() {
+func (m *ProjectMonitor) poll(ctx context.Context) {
 	now := time.Now()
 	entries, etag, modified, err := m.client.fetch(m.cfg.FeedURL, m.state.ETag)
 	if err != nil {
 		if errors.Is(err, errAnubis) {
-			m.handleAnubis(now)
+			m.handleAnubis(ctx, now)
 			return
 		}
 		m.logger.Warn("feed fetch failed", "error", err)
@@ -349,7 +352,7 @@ func (m *ProjectMonitor) poll() {
 
 	m.logger.Debug("activities classified", "accepted", len(accepted), "announced", len(acts))
 	if len(acts) > 0 {
-		m.announce(acts)
+		m.announce(ctx, acts)
 		for i := range acts {
 			h := acts[i].history()
 			h.Timestamp = acts[i].at.UTC()
@@ -488,11 +491,19 @@ func (m *ProjectMonitor) remember(it issueTitle) {
 }
 
 // announce posts the activities batched by project, split at the poster's
-// length limit.
-func (m *ProjectMonitor) announce(acts []activity) {
+// length limit.  URLs are shortened first when a shortener is configured.
+func (m *ProjectMonitor) announce(ctx context.Context, acts []activity) {
+	short := m.shortenURLs(ctx, acts)
+
 	lines := make([]string, len(acts))
 	for i := range acts {
-		lines[i] = acts[i].line()
+		a := acts[i]
+		if short != nil && a.url != "" {
+			if u, ok := short[a.url]; ok {
+				a.url = u
+			}
+		}
+		lines[i] = a.line()
 	}
 	prompt := "[" + m.cfg.Name + "] "
 	maxLen := m.poster.GetMaxLength() - len(prompt)
@@ -502,7 +513,7 @@ func (m *ProjectMonitor) announce(acts []activity) {
 	curLen := 0
 	flush := func() {
 		if len(texts) > 0 {
-			m.post(prompt + strings.Join(texts, sep))
+			m.post(ctx, prompt+strings.Join(texts, sep))
 			texts = texts[:0]
 			curLen = 0
 		}
@@ -524,9 +535,32 @@ func (m *ProjectMonitor) announce(acts []activity) {
 	flush()
 }
 
-func (m *ProjectMonitor) post(text string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+// shortenURLs resolves the unique URLs displayed by the activities, returning
+// a map from the full URL to its short form.
+func (m *ProjectMonitor) shortenURLs(ctx context.Context, acts []activity) map[string]string {
+	if m.shortener == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var targets []string
+	for i := range acts {
+		if acts[i].action != "create" || acts[i].url == "" || seen[acts[i].url] {
+			continue
+		}
+		seen[acts[i].url] = true
+		targets = append(targets, acts[i].url)
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	short, err := m.shortener.ShortenBatch(ctx, targets)
+	if err != nil {
+		m.logger.Warn("URL shortening failed; using full URLs", "error", err)
+	}
+	return short
+}
+
+func (m *ProjectMonitor) post(ctx context.Context, text string) {
 	if err := m.poster.Post(ctx, text); err != nil {
 		m.logger.Error("announce failed", "error", err)
 	}
@@ -534,12 +568,12 @@ func (m *ProjectMonitor) post(text string) {
 
 // handleAnubis records a block and announces a single warning once the
 // block streak reaches anubisWarnAfter.
-func (m *ProjectMonitor) handleAnubis(now time.Time) {
+func (m *ProjectMonitor) handleAnubis(ctx context.Context, now time.Time) {
 	m.state.AnubisStreak++
 	m.logger.Warn("blocked by Anubis", "streak", m.state.AnubisStreak)
 	if m.state.AnubisStreak >= anubisWarnAfter && !m.state.AnubisWarned {
 		m.state.AnubisWarned = true
-		m.post(fmt.Sprintf("[%s] I'm blocked by Anubis (%d consecutive polls). Help!",
+		m.post(ctx, fmt.Sprintf("[%s] I'm blocked by Anubis (%d consecutive polls). Help!",
 			m.cfg.Name, m.state.AnubisStreak))
 	}
 	m.state.UpdatedAt = now.Unix()

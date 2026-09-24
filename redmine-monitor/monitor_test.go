@@ -111,7 +111,7 @@ func newTestMonitor(t *testing.T, ts *httptest.Server, cfg *ConfigProject,
 	dir := t.TempDir()
 	client := newAtomClient()
 	cfg.FeedURL = ts.URL + "/projects/dragonfly/activity.atom?key=SECRET"
-	m := NewProjectMonitor(cfg, client, poster, dir, nil)
+	m := NewProjectMonitor(cfg, client, poster, nil, dir, nil)
 	m.loadState()
 	return m, dir
 }
@@ -134,7 +134,7 @@ func TestMonitorSeedThenAnnounce(t *testing.T) {
 	poster := &recordPoster{}
 	m, dir := newTestMonitor(t, ts, defaultProject(), poster)
 
-	m.poll() // first run: seed silently
+	m.poll(context.Background()) // first run: seed silently
 	if got := poster.messages(); len(got) != 0 {
 		t.Fatalf("seed announced: %v", got)
 	}
@@ -148,7 +148,7 @@ func TestMonitorSeedThenAnnounce(t *testing.T) {
 		testEntry("https://bugs.example.org/issues/2",
 			"DragonFlyBSD - Bug #2 (New): second issue", t1, "dave", "<p>second body</p>"),
 	)
-	m.poll()
+	m.poll(context.Background())
 
 	msgs := poster.messages()
 	if len(msgs) != 1 {
@@ -192,7 +192,7 @@ func TestMonitorActionFilter(t *testing.T) {
 	cfg.Actions = []string{"create"} // only creations announced
 	poster := &recordPoster{}
 	m, _ := newTestMonitor(t, ts, cfg, poster)
-	m.poll() // seed
+	m.poll(context.Background()) // seed
 
 	stub.set(`"e1"`,
 		testEntry("https://bugs.example.org/issues/1#change-5",
@@ -200,7 +200,7 @@ func TestMonitorActionFilter(t *testing.T) {
 		testEntry("https://bugs.example.org/issues/2",
 			"DragonFlyBSD - Bug #2 (New): second issue", "2026-09-10T16:00:00Z", "dave", "<p>body</p>"),
 	)
-	m.poll()
+	m.poll(context.Background())
 
 	msgs := poster.messages()
 	if len(msgs) != 1 || !strings.Contains(msgs[0], "created by dave") {
@@ -220,11 +220,11 @@ func TestMonitorReopen(t *testing.T) {
 
 	poster := &recordPoster{}
 	m, _ := newTestMonitor(t, ts, defaultProject(), poster)
-	m.poll() // seed with a resolved issue
+	m.poll(context.Background()) // seed with a resolved issue
 
 	stub.set(`"e1"`, testEntry("https://bugs.example.org/issues/1#change-5",
 		"DragonFlyBSD - Bug #1 (Feedback): first issue", "2026-09-10T16:00:00Z", "bob", "<p>please retest</p>"))
-	m.poll()
+	m.poll(context.Background())
 
 	msgs := poster.messages()
 	if len(msgs) != 1 || !strings.Contains(msgs[0], "reopened by bob: please retest") {
@@ -242,28 +242,28 @@ func TestMonitorAnubisWarn(t *testing.T) {
 	poster := &recordPoster{}
 	m, _ := newTestMonitor(t, ts, defaultProject(), poster)
 
-	m.poll()
-	m.poll()
+	m.poll(context.Background())
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 0 {
 		t.Fatalf("warned before the threshold: %v", got)
 	}
-	m.poll() // third consecutive block: warn
+	m.poll(context.Background()) // third consecutive block: warn
 	got := poster.messages()
 	if len(got) != 1 || !strings.Contains(got[0], "Anubis") {
 		t.Fatalf("messages after threshold = %v", got)
 	}
-	m.poll() // still blocked: no repeated warning
+	m.poll(context.Background()) // still blocked: no repeated warning
 	if got := poster.messages(); len(got) != 1 {
 		t.Fatalf("warning repeated: %v", got)
 	}
 
 	// A success re-arms the warning for a later block streak.
 	stub.setBlocked(false)
-	m.poll() // seed
+	m.poll(context.Background()) // seed
 	stub.setBlocked(true)
-	m.poll()
-	m.poll()
-	m.poll()
+	m.poll(context.Background())
+	m.poll(context.Background())
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 2 {
 		t.Fatalf("warning not re-armed: %v", got)
 	}
@@ -282,13 +282,13 @@ func TestMonitorRestartDedupe(t *testing.T) {
 	poster := &recordPoster{}
 	client := newAtomClient()
 
-	m1 := NewProjectMonitor(cfg, client, poster, dir, nil)
+	m1 := NewProjectMonitor(cfg, client, poster, nil, dir, nil)
 	m1.loadState()
-	m1.poll() // seed
+	m1.poll(context.Background()) // seed
 
-	m2 := NewProjectMonitor(cfg, client, poster, dir, nil)
+	m2 := NewProjectMonitor(cfg, client, poster, nil, dir, nil)
 	m2.loadState()
-	m2.poll() // 304: nothing re-announced
+	m2.poll(context.Background()) // 304: nothing re-announced
 	if got := poster.messages(); len(got) != 0 {
 		t.Fatalf("restart re-announced: %v", got)
 	}
@@ -304,7 +304,7 @@ func TestMonitorSameSecondBoundary(t *testing.T) {
 
 	poster := &recordPoster{}
 	m, _ := newTestMonitor(t, ts, defaultProject(), poster)
-	m.poll() // seed at sameT
+	m.poll(context.Background()) // seed at sameT
 
 	// Two comments sharing the watermark second arrive together.
 	stub.set(`"e1"`,
@@ -312,7 +312,7 @@ func TestMonitorSameSecondBoundary(t *testing.T) {
 			"DragonFlyBSD - Bug #1: first issue", sameT, "bob", "<p>second</p>"),
 		testEntry("https://bugs.example.org/issues/1#change-5",
 			"DragonFlyBSD - Bug #1: first issue", sameT, "bob", "<p>first</p>"))
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 1 ||
 		!strings.Contains(got[0], "first") || !strings.Contains(got[0], "second") {
 		t.Fatalf("same-second poll = %v", got)
@@ -324,8 +324,56 @@ func TestMonitorSameSecondBoundary(t *testing.T) {
 			"DragonFlyBSD - Bug #1: first issue", sameT, "bob", "<p>second</p>"),
 		testEntry("https://bugs.example.org/issues/1#change-5",
 			"DragonFlyBSD - Bug #1: first issue", sameT, "bob", "<p>first</p>"))
-	m.poll()
+	m.poll(context.Background())
 	if got := poster.messages(); len(got) != 1 {
 		t.Fatalf("redelivery re-announced: %v", got)
+	}
+}
+
+type fakeShortener struct {
+	short string
+	err   error
+	calls []string
+}
+
+func (f *fakeShortener) Shorten(_ context.Context, target string) (string, error) {
+	f.calls = append(f.calls, target)
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.short, nil
+}
+
+func (f *fakeShortener) ShortenBatch(_ context.Context, targets []string) (map[string]string, error) {
+	f.calls = append(f.calls, targets...)
+	out := make(map[string]string, len(targets))
+	for _, target := range targets {
+		out[target] = f.short
+	}
+	if f.err != nil {
+		return map[string]string{}, f.err
+	}
+	return out, nil
+}
+
+func TestAnnounceShortensCreateURL(t *testing.T) {
+	poster := &recordPoster{}
+	fs := &fakeShortener{short: "https://s.example/rm"}
+	m := NewProjectMonitor(defaultProject(), nil, poster, fs, t.TempDir(), nil)
+
+	m.announce(context.Background(), []activity{{
+		action: "create", number: 1, actor: "aly", tracker: "Bug",
+		subject: "first issue", url: "https://bugs.example.org/issues/1",
+	}})
+
+	msgs := poster.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %v", msgs)
+	}
+	if !strings.Contains(msgs[0], "https://s.example/rm") {
+		t.Errorf("message does not use the short URL: %s", msgs[0])
+	}
+	if len(fs.calls) != 1 || fs.calls[0] != "https://bugs.example.org/issues/1" {
+		t.Errorf("shortener calls = %v", fs.calls)
 	}
 }

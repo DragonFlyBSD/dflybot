@@ -175,10 +175,11 @@ func (st *repoState) setLast(at time.Time, ids []int64) {
 }
 
 type RepoMonitor struct {
-	cfg    *ConfigRepo
-	github *githubClient
-	poster monitor.Poster
-	logger *slog.Logger
+	cfg       *ConfigRepo
+	github    *githubClient
+	poster    monitor.Poster
+	shortener monitor.Shortener
+	logger    *slog.Logger
 
 	statePath   string
 	historyPath string
@@ -191,6 +192,7 @@ func NewRepoMonitor(
 	cfg *ConfigRepo,
 	gh *githubClient,
 	poster monitor.Poster,
+	shortener monitor.Shortener,
 	dataDir string,
 	base *slog.Logger,
 ) *RepoMonitor {
@@ -202,6 +204,7 @@ func NewRepoMonitor(
 		cfg:         cfg,
 		github:      gh,
 		poster:      poster,
+		shortener:   shortener,
 		logger:      logger,
 		statePath:   filepath.Join(dataDir, cfg.Project, cfg.Repo+".state"),
 		historyPath: filepath.Join(dataDir, cfg.Project, cfg.Repo+".history"),
@@ -230,12 +233,12 @@ func (m *RepoMonitor) Start(ctx context.Context, wg *sync.WaitGroup) {
 		"interval", m.cfg.Interval, "last_event_at", m.state.LastEventAt,
 		"ignored_users", m.cfg.IgnoredUsers)
 
-	monitor.Loop(ctx, time.Duration(m.cfg.Interval)*time.Second, m.poll)
+	monitor.Loop(ctx, time.Duration(m.cfg.Interval)*time.Second, func() { m.poll(ctx) })
 	m.logger.Debug("repo monitor exiting")
 }
 
 // poll checks the repo events once and announces the new ones.
-func (m *RepoMonitor) poll() {
+func (m *RepoMonitor) poll(ctx context.Context) {
 	now := time.Now()
 	events, etag, modified, err := m.github.fetchEvents(
 		m.cfg.Project, m.cfg.Repo, m.state.ETag, m.state.lastAt())
@@ -337,7 +340,7 @@ func (m *RepoMonitor) poll() {
 
 	m.logger.Debug("activities classified", "count", len(acts))
 	if len(acts) > 0 {
-		m.announce(acts)
+		m.announce(ctx, acts)
 		for i := range acts {
 			h := acts[i].history()
 			h.Timestamp = idTime[acts[i].eventID].UTC()
@@ -481,10 +484,18 @@ func (m *RepoMonitor) fillPR(ref *ghRef) {
 }
 
 // announce posts the activities batched by repo, split at the poster's
-// length limit.
-func (m *RepoMonitor) announce(acts []activity) {
+// length limit.  URLs are shortened first when a shortener is configured.
+func (m *RepoMonitor) announce(ctx context.Context, acts []activity) {
+	short := m.shortenURLs(ctx, acts)
+
 	lines := make([]string, len(acts))
-	for i, a := range acts {
+	for i := range acts {
+		a := acts[i]
+		if short != nil && a.url != "" {
+			if u, ok := short[a.url]; ok {
+				a.url = u
+			}
+		}
 		lines[i] = a.line()
 	}
 	prompt := "[" + m.cfg.Project + "/" + m.cfg.Repo + "] "
@@ -495,7 +506,7 @@ func (m *RepoMonitor) announce(acts []activity) {
 	curLen := 0
 	flush := func() {
 		if len(texts) > 0 {
-			m.post(prompt + strings.Join(texts, sep))
+			m.post(ctx, prompt+strings.Join(texts, sep))
 			texts = texts[:0]
 			curLen = 0
 		}
@@ -517,9 +528,32 @@ func (m *RepoMonitor) announce(acts []activity) {
 	flush()
 }
 
-func (m *RepoMonitor) post(text string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+// shortenURLs resolves the unique URLs displayed by the activities, returning
+// a map from the full URL to its short form.
+func (m *RepoMonitor) shortenURLs(ctx context.Context, acts []activity) map[string]string {
+	if m.shortener == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var targets []string
+	for i := range acts {
+		if acts[i].action != "create" || acts[i].url == "" || seen[acts[i].url] {
+			continue
+		}
+		seen[acts[i].url] = true
+		targets = append(targets, acts[i].url)
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	short, err := m.shortener.ShortenBatch(ctx, targets)
+	if err != nil {
+		m.logger.Warn("URL shortening failed; using full URLs", "error", err)
+	}
+	return short
+}
+
+func (m *RepoMonitor) post(ctx context.Context, text string) {
 	if err := m.poster.Post(ctx, text); err != nil {
 		m.logger.Error("announce failed", "error", err)
 	}

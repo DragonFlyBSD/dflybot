@@ -36,6 +36,9 @@ type Config struct {
 	DataDir string `toml:"data_dir" validate:"dirpath"`
 	// Webhook settings.
 	Webhook monitor.ConfigWebhook `toml:"webhook" validate:"required"`
+	// URL shortener settings (optional; when absent the full URLs are
+	// announced).
+	URLShort *monitor.ConfigURLShort `toml:"urlshort"`
 	// List of Redmine projects to monitor.
 	Projects []ConfigProject `toml:"projects" validate:"required,min=1,dive"`
 }
@@ -100,6 +103,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	var shortener monitor.Shortener
+	if config.URLShort != nil {
+		s, err := monitor.NewURLShortener(config.URLShort)
+		if err != nil {
+			slog.Error("invalid urlshort config", "error", err)
+			os.Exit(1)
+		}
+		shortener = s
+	}
+
 	// Setup context and signal handling.
 	ctx, cancel := monitor.SignalContext()
 	defer cancel()
@@ -114,7 +127,7 @@ func main() {
 			slog.Info("skip disabled project", "name", project.Name)
 			continue
 		}
-		mon := NewProjectMonitor(project, client, webhook, config.DataDir, nil)
+		mon := NewProjectMonitor(project, client, webhook, shortener, config.DataDir, nil)
 		wg.Add(1)
 		go mon.Start(ctx, wg)
 	}
