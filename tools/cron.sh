@@ -158,7 +158,7 @@ win_index() {
 # Create the session and windows, then start the specified program or all
 # programs.
 cmd_start() {
-	name=$1
+	name=${1:-""}
 	require_tmux
 	rc=0
 	if ! session_exists; then
@@ -264,7 +264,7 @@ cmd_status() {
 
 # Stop the specified program or all programs; the session and windows are kept.
 cmd_stop() {
-	name=$1
+	name=${1:-""}
 	require_tmux
 	rc=0
 	if [ -n "$name" ]; then
