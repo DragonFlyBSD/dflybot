@@ -72,7 +72,7 @@ func (c *jenkinsClient) jobPath(name, tree string) string {
 }
 
 func (c *jenkinsClient) buildPath(name string, number int64) string {
-	query := url.Values{"tree": {"result,timestamp,url"}}
+	query := url.Values{"tree": {"number,result,timestamp,url"}}
 	return c.baseURL + "/job/" + url.PathEscape(name) + "/" +
 		strconv.FormatInt(number, 10) + "/api/json?" + query.Encode()
 }
@@ -128,6 +128,12 @@ func (c *jenkinsClient) build(name string, number int64) (*jenkinsBuild, error) 
 	var b jenkinsBuild
 	if err := c.get(c.buildPath(name, number), &b); err != nil {
 		return nil, err
+	}
+	// The requested number is authoritative: Jenkins only returns the
+	// fields listed in the 'tree' query, so guard against a response that
+	// omits "number" (which would otherwise announce "build #0").
+	if b.Number == 0 {
+		b.Number = number
 	}
 	return &b, nil
 }

@@ -62,6 +62,54 @@ func TestJenkinsClientRequests(t *testing.T) {
 	}
 }
 
+// TestJenkinsClientBuildRequestsNumber guards against a build request whose
+// 'tree' omits "number", which made the monitor announce "build #0".
+func TestJenkinsClientBuildRequestsNumber(t *testing.T) {
+	var gotPath, gotTree string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotTree = r.URL.Query().Get("tree")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(jenkinsBuild{Number: 42, Result: "FAILURE",
+			URL: "https://ci/job/X/42/"})
+	}))
+	defer ts.Close()
+
+	c := newJenkinsClient(&ConfigJenkins{URL: ts.URL, Jobs: []string{"X"}})
+	b, err := c.build("X", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/job/X/42/api/json" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if !strings.Contains(gotTree, "number") {
+		t.Errorf("build tree does not request the number: %q", gotTree)
+	}
+	if b.Number != 42 {
+		t.Errorf("number = %d, want 42", b.Number)
+	}
+}
+
+// TestJenkinsClientBuildNumberFallback checks that the requested build number
+// is used even when a Jenkins response omits the "number" field.
+func TestJenkinsClientBuildNumberFallback(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"result":"FAILURE","url":"https://ci/job/X/7/"}`))
+	}))
+	defer ts.Close()
+
+	c := newJenkinsClient(&ConfigJenkins{URL: ts.URL, Jobs: []string{"X"}})
+	b, err := c.build("X", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Number != 7 {
+		t.Errorf("number = %d, want 7", b.Number)
+	}
+}
+
 func TestJenkinsClientNotFound(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
