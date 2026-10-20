@@ -110,6 +110,26 @@ func TestJenkinsClientBuildNumberFallback(t *testing.T) {
 	}
 }
 
+// TestJenkinsClientQueueRequestsBlocked guards the queue watchdog's use of
+// the exported "blocked" flag.
+func TestJenkinsClientQueueRequestsBlocked(t *testing.T) {
+	var gotTree string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTree = r.URL.Query().Get("tree")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"items":[]}`))
+	}))
+	defer ts.Close()
+
+	c := newJenkinsClient(&ConfigJenkins{URL: ts.URL, Jobs: []string{"X"}})
+	if _, err := c.queueItems(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotTree, "blocked") {
+		t.Errorf("queue tree does not request 'blocked': %q", gotTree)
+	}
+}
+
 func TestJenkinsClientNotFound(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)

@@ -19,7 +19,9 @@
 //   - Jobs stuck in the build queue (waiting for an executor) are announced
 //     once per queue item, when older than queue_stuck_after (or marked
 //     stuck by Jenkins); a "queue cleared" message follows when the item
-//     disappears.
+//     disappears.  An item that Jenkins blocks (e.g. because an earlier build
+//     of the same job is still running) is not waiting for an executor and is
+//     ignored.
 //   - Nodes (computers) are only monitored when explicitly listed in the
 //     config's node whitelist.
 //
@@ -399,7 +401,9 @@ func (m *Monitor) pollNodes(ctx context.Context) error {
 // pollQueue watches the Jenkins build queue for jobs stuck waiting for an
 // executor.  A job whose queue item is older than queue_stuck_after (or
 // that Jenkins itself marks as stuck) is announced once per queue item;
-// when the item clears, a "queue cleared" message is announced.
+// when the item clears, a "queue cleared" message is announced.  Only items
+// waiting for an executor are considered: a blocked item (e.g. an earlier
+// build of the same job is still running) is ignored.
 func (m *Monitor) pollQueue(ctx context.Context) error {
 	items, err := m.jenkins.queueItems()
 	if err != nil {
@@ -440,6 +444,24 @@ func (m *Monitor) pollQueue(ctx context.Context) error {
 			}
 			continue
 		}
+
+		// Jenkins blocks a queue item when it cannot be built yet,
+		// e.g. because an earlier build of the same job is still
+		// running.  Such an item is not competing for an executor and
+		// must not be reported as stuck.  Forget any stale watchdog
+		// state without announcing, so a later genuine wait can be
+		// announced afresh.
+		if item.Blocked {
+			if st.StuckItemID != 0 {
+				m.logger.Debug("queue item blocked; not stuck",
+					"job", name, "item", item.ID, "why", item.Why)
+				st.StuckItemID = 0
+				st.StuckSince = 0
+				st.StuckWhy = ""
+			}
+			continue
+		}
+
 		if st.StuckItemID == item.ID {
 			continue // already announced for this queue item
 		}

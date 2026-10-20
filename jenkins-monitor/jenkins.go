@@ -144,6 +144,7 @@ type jenkinsQueueItem struct {
 	ID           int64  `json:"id"`
 	Why          string `json:"why"`
 	Stuck        bool   `json:"stuck"`
+	Blocked      bool   `json:"blocked"`
 	InQueueSince int64  `json:"inQueueSince"`
 	Task         struct {
 		Name string `json:"name"`
@@ -152,7 +153,7 @@ type jenkinsQueueItem struct {
 
 // queueItems lists the current build queue items.
 func (c *jenkinsClient) queueItems() ([]jenkinsQueueItem, error) {
-	query := url.Values{"tree": {"items[id,why,stuck,inQueueSince,task[name]]"}}
+	query := url.Values{"tree": {"items[id,why,stuck,blocked,inQueueSince,task[name]]"}}
 	path := c.baseURL + "/queue/api/json?" + query.Encode()
 	var set struct {
 		Items []jenkinsQueueItem `json:"items"`

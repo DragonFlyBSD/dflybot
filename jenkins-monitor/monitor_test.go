@@ -61,6 +61,7 @@ type stubQueue struct {
 	ID           int64  `json:"id"`
 	Why          string `json:"why"`
 	Stuck        bool   `json:"stuck"`
+	Blocked      bool   `json:"blocked"`
 	InQueueSince int64  `json:"inQueueSince"` // epoch ms
 	Task         struct {
 		Name string `json:"name"`
@@ -472,6 +473,40 @@ func TestMonitorQueueStuckFlag(t *testing.T) {
 	if got := poster.messages(); len(got) != 1 ||
 		!strings.Contains(got[0], "STUCK in queue: no available executors") {
 		t.Fatalf("stuck-flag messages = %v", got)
+	}
+}
+
+// TestMonitorQueueBlocked covers DragonFly's duplicated triggers: the second
+// build is blocked while the first (same job) runs and must not be reported
+// as stuck, even when old or flagged stuck by Jenkins.
+func TestMonitorQueueBlocked(t *testing.T) {
+	stub := &jenkinsStub{}
+	stub.setLast("DragonFlyBSD", stubBuild{Number: 1, Result: "SUCCESS", URL: "https://ci/x/1/"})
+	now := time.Now()
+	ait := queueItemAt(11, now.Add(-2*time.Hour),
+		"Build #217 is already in progress (ETA: 1 hr 42 min)")
+	ait.Blocked = true
+	ait.Stuck = true
+	stub.setQueue([]stubQueue{ait})
+	ts := httptest.NewServer(stub.handler())
+	defer ts.Close()
+
+	poster := &recordPoster{}
+	m, _ := newTestMonitor(t, fakeCfg(ts), poster)
+	m.poll(context.Background())
+	if got := poster.messages(); len(got) != 0 {
+		t.Fatalf("blocked queue item announced as stuck: %v", got)
+	}
+
+	// Once the item is no longer blocked (waiting for an executor), it is
+	// announced.
+	unblocked := queueItemAt(11, now.Add(-2*time.Hour),
+		"Waiting for next available executor")
+	stub.setQueue([]stubQueue{unblocked})
+	m.poll(context.Background())
+	if got := poster.messages(); len(got) != 1 ||
+		!strings.Contains(got[0], "STUCK in queue: Waiting for next available executor") {
+		t.Fatalf("executor wait not announced: %v", got)
 	}
 }
 
