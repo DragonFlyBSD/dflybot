@@ -26,9 +26,6 @@ term_wait=10        # grace between SIGTERM and SIGKILL
 start_wait=10       # wait for a program to come up after starting it
 lock_wait=300       # wait bound for the lock (mutating commands)
 
-NL='
-'
-
 die() {
 	echo "cron.sh: $*" >&2
 	exit 1
@@ -183,7 +180,12 @@ start_one() {
 	name=$1
 
 	if ! win_exists "$name"; then
-		if tmux new-window -t "$session_name" -n "$name" -c "$root"; then
+		# The trailing colon makes this a session target.  Without it tmux
+		# treats "$session_name" as a window name; since the first window is
+		# also named after the session, new-window would try to reuse that
+		# window's index and fail with "index N in use".  An empty window
+		# part means "append at the next free index".
+		if tmux new-window -t "$session_name:" -n "$name" -c "$root"; then
 			echo "start: $name: created window"
 		else
 			warn "start: $name: failed to create window"
@@ -211,9 +213,16 @@ start_one() {
 	# (which the exec preserves, so the pid file holds the program's pid)
 	# and then execs the program; the window's own shell survives.
 	pidfile="$rundir/$name.pid"
-	line="sh -c 'echo \$\$ > \"$pidfile\"; exec \"$bin\" -config \"$conf\"'$NL"
+	line="sh -c 'echo \$\$ > \"$pidfile\"; exec \"$bin\" -config \"$conf\"'"
 	if ! tmux send-keys -l -t "$session_name:$name" "$line"; then
 		warn "start: $name: send-keys failed"
+		return 1
+	fi
+	# Submit with an explicit Enter key.  Do not embed a newline in the
+	# literal text: that sends LF (C-J), which is not necessarily accepted
+	# as Enter by the shell running in the window.
+	if ! tmux send-keys -t "$session_name:$name" Enter; then
+		warn "start: $name: send-keys (Enter) failed"
 		return 1
 	fi
 

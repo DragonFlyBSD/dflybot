@@ -121,11 +121,15 @@ Under the lock:
    `tmux new-session -d -s dflybot -n dflybot -c <root>`.
 2. For each program, in order (`dflybot` first — the monitors need its
    webhook):
-   - window missing       => `tmux new-window -t dflybot -n <name> -c <root>`;
+   - window missing       => `tmux new-window -t dflybot: -n <name> -c <root>`
+     (the trailing colon forces a session target so the window is appended
+     at the next free index; a bare `dflybot` would be read as the existing
+     window of that name);
    - program not running  => binary `<name>.${os}` and config `<name>.toml`
-     must exist and be readable/executable, then send-keys the start line and
-     poll (0.5 s interval, 10 s bound) until the pid file reports the program
-     running; report failure (with a hint to `open` the window) otherwise;
+     must exist and be readable/executable, then send-keys the start line
+     followed by an explicit `Enter` key and poll (1 s interval, 10 s bound)
+     until the pid file reports the program running; report failure (with a
+     hint to `open` the window) otherwise;
    - program already running => skip (report).
 Exit 0 iff every program is running at the end.
 
