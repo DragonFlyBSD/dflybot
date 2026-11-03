@@ -358,7 +358,11 @@ func (m *RepoMonitor) poll(ctx context.Context) {
 
 // classify maps an event to an activity, honoring the configured actions.
 func (m *RepoMonitor) classify(e *ghEvent) (*activity, bool) {
-	if userIgnored(e.Actor.Login, m.cfg.IgnoredUsers) {
+	// The Events API reports the PR author, not the merger, as the actor
+	// of a "merged" event.  Resolve the actual merger before filtering
+	// ignored users.
+	mergedPR := (e.Type == "PullRequestEvent" && e.Payload.Action == "merged")
+	if !mergedPR && userIgnored(e.Actor.Login, m.cfg.IgnoredUsers) {
 		m.logger.Debug("event ignored by user", "user", e.Actor.Login, "type", e.Type)
 		return nil, false
 	}
@@ -412,11 +416,19 @@ func (m *RepoMonitor) classify(e *ghEvent) (*activity, bool) {
 				m.fillPR(ref)
 			}
 		}
+		actor := e.Actor.Login
+		if action == "merge" && ref.MergedBy != nil && ref.MergedBy.Login != "" {
+			actor = ref.MergedBy.Login
+		}
+		if userIgnored(actor, m.cfg.IgnoredUsers) {
+			m.logger.Debug("PR event ignored by user", "user", actor)
+			return nil, false
+		}
 		a = &activity{
 			kind:    activityPR,
 			action:  action,
 			number:  ref.Number,
-			actor:   e.Actor.Login,
+			actor:   actor,
 			title:   snippet(ref.Title, titleMax),
 			url:     ref.HtmlUrl,
 			eventID: int64(e.ID),

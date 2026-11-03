@@ -159,8 +159,8 @@ func TestClassifyIgnoredUser(t *testing.T) {
 
 func TestGetRef(t *testing.T) {
 	pr := `{"url":"https://api.github.com/repos/o/r/pulls/9","id":1,"number":9,
-		"state":"open","title":"fix foo","html_url":"https://github.com/o/r/pull/9",
-		"user":{"login":"bob"}}`
+		"state":"closed","title":"fix foo","html_url":"https://github.com/o/r/pull/9",
+		"user":{"login":"bob"},"merged_by":{"login":"carol"}}`
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(pr))
@@ -175,6 +175,9 @@ func TestGetRef(t *testing.T) {
 	if ref.Number != 9 || ref.Title != "fix foo" ||
 		ref.HtmlUrl != "https://github.com/o/r/pull/9" {
 		t.Errorf("ref = %+v", ref)
+	}
+	if ref.MergedBy == nil || ref.MergedBy.Login != "carol" {
+		t.Errorf("merged_by = %+v, want carol", ref.MergedBy)
 	}
 }
 

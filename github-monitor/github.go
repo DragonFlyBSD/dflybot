@@ -83,6 +83,10 @@ type ghRef struct {
 	User    struct {
 		Login string `json:"login"`
 	} `json:"user"`
+	// MergedBy is the user who actually merged the pull request.  The
+	// Events API names the PR author as the actor of a merged event, so
+	// this field provides the correct actor.
+	MergedBy    *ghActor        `json:"merged_by"`
 	PullRequest json.RawMessage `json:"pull_request"` // non-null when a PR
 }
 

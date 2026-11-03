@@ -619,15 +619,18 @@ func TestMonitorPRDetailsAndMerge(t *testing.T) {
 	abbrevPR := `{"url":"$BASE$/repos/o/r/pulls/1668","id":4479651821,"number":1668,
 		"head":{"ref":"agentic/x","sha":"111","repo":{"id":1}},
 		"base":{"ref":"master","sha":"222","repo":{"id":1}}}`
-	prEvent := func(id, action, at string) string {
+	prEvent := func(id, action, at, actor string) string {
 		return fmt.Sprintf(`{"id":%q,"type":"PullRequestEvent","created_at":%q,
-			"actor":{"login":"dragonflybot"},"payload":{"action":%q,"pull_request":%s}}`,
-			id, at, action, abbrevPR)
+			"actor":{"login":%q},"payload":{"action":%q,"pull_request":%s}}`,
+			id, at, actor, action, abbrevPR)
 	}
+	// GitHub names the PR author as the event actor for the merged event,
+	// but the actual merger is only available in the full pull request.
 	fullPR := `{"url":"$BASE$/repos/o/r/pulls/1668","id":4479651821,"number":1668,
 		"state":"closed","title":"devel/libcxx22: fix build failure on DragonFly",
-		"html_url":"https://github.com/o/r/pull/1668","user":{"login":"dragonflybot"},
-		"merged":true,"merged_at":"2026-09-08T23:59:54Z"}`
+		"html_url":"https://github.com/o/r/pull/1668","user":{"login":"reporter"},
+		"merged":true,"merged_at":"2026-09-08T23:59:54Z",
+		"merged_by":{"login":"merger"}}`
 
 	stub := &eventsAndRefStub{fullPR: fullPR}
 	stub.setEvents(`"e0"`, []string{openEventAt("0", "2026-09-08T23:00:00Z")})
@@ -639,8 +642,8 @@ func TestMonitorPRDetailsAndMerge(t *testing.T) {
 	m.poll(context.Background()) // seed silently
 
 	stub.setEvents(`"e1"`, []string{
-		prEvent("14672592472", "merged", "2026-09-08T23:59:54Z"), // newest first
-		prEvent("14672578728", "opened", "2026-09-08T23:59:31Z"),
+		prEvent("14672592472", "merged", "2026-09-08T23:59:54Z", "reporter"), // newest first
+		prEvent("14672578728", "opened", "2026-09-08T23:59:31Z", "dragonflybot"),
 	})
 	m.poll(context.Background())
 
@@ -649,9 +652,8 @@ func TestMonitorPRDetailsAndMerge(t *testing.T) {
 		t.Fatalf("messages = %d: %v", len(msgs), msgs)
 	}
 	for _, want := range []string{
-		"PR #1668 (devel/libcxx22: fix build failure on DragonFly) opened by dragonflybot:" +
-			" https://github.com/o/r/pull/1668",
-		"PR #1668 (devel/libcxx22: fix build failure on DragonFly) merged by dragonflybot",
+		"PR #1668 (devel/libcxx22: fix build failure on DragonFly) opened by dragonflybot: https://github.com/o/r/pull/1668",
+		"PR #1668 (devel/libcxx22: fix build failure on DragonFly) merged by merger",
 	} {
 		if !strings.Contains(msgs[0], want) {
 			t.Errorf("message missing %q:\n%s", want, msgs[0])
@@ -669,6 +671,7 @@ func TestMonitorPRDetailsAndMerge(t *testing.T) {
 		`"kind":"PR","action":"create"`, `"action":"merge"`,
 		`"title":"devel/libcxx22: fix build failure on DragonFly"`,
 		`"url":"https://github.com/o/r/pull/1668"`,
+		`"actor":"merger"`,
 	} {
 		if !strings.Contains(string(hist), want) {
 			t.Errorf("history missing %q:\n%s", want, hist)
